@@ -35,7 +35,10 @@ impl VorbisComment {
             return Err(MutagenError::InvalidData("Vendor string extends past data".into()));
         }
 
-        let vendor = String::from_utf8_lossy(&data[pos..pos + vendor_len]).into_owned();
+        let vendor = match std::str::from_utf8(&data[pos..pos + vendor_len]) {
+            Ok(s) => s.to_string(),
+            Err(_) => String::from_utf8_lossy(&data[pos..pos + vendor_len]).into_owned(),
+        };
         pos += vendor_len;
 
         if pos + 4 > data.len() {
@@ -64,12 +67,24 @@ impl VorbisComment {
                 break;
             }
 
-            let comment_str = String::from_utf8_lossy(&data[pos..pos + comment_len]);
+            let raw = &data[pos..pos + comment_len];
             pos += comment_len;
+
+            // Try zero-copy UTF-8, fall back to lossy
+            let comment_str = match std::str::from_utf8(raw) {
+                Ok(s) => std::borrow::Cow::Borrowed(s),
+                Err(_) => String::from_utf8_lossy(raw),
+            };
 
             // Split on first '='
             if let Some(eq_pos) = comment_str.find('=') {
-                let key = comment_str[..eq_pos].to_uppercase();
+                // Uppercase key - most keys are already ASCII uppercase
+                let key_part = &comment_str[..eq_pos];
+                let key = if key_part.bytes().all(|b| b.is_ascii_uppercase() || !b.is_ascii_lowercase()) {
+                    key_part.to_string()
+                } else {
+                    key_part.to_uppercase()
+                };
                 let value = comment_str[eq_pos + 1..].to_string();
                 comments.push((key, value));
             }

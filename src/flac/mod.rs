@@ -295,28 +295,36 @@ impl FLACFile {
                 break;
             }
 
-            let block_data = data[pos..pos + block_size].to_vec();
+            let block_slice = &data[pos..pos + block_size];
             pos += block_size;
 
             match block_type {
                 BlockType::StreamInfo => {
-                    stream_info = Some(StreamInfo::parse(&block_data)?);
+                    stream_info = Some(StreamInfo::parse(block_slice)?);
                 }
                 BlockType::VorbisComment => {
-                    tags = Some(VorbisComment::parse(&block_data, false)?);
+                    tags = Some(VorbisComment::parse(block_slice, false)?);
                 }
                 BlockType::Picture => {
-                    if let Ok(pic) = FLACPicture::parse(&block_data) {
+                    if let Ok(pic) = FLACPicture::parse(block_slice) {
                         pictures.push(pic);
                     }
                 }
                 _ => {}
             }
 
+            // Only store raw data for blocks needed by save().
+            // Parsed blocks (VorbisComment, Picture) are regenerated from parsed structs.
+            // Padding is regenerated. Only StreamInfo and other blocks need raw data.
+            let store_data = match block_type {
+                BlockType::VorbisComment | BlockType::Picture | BlockType::Padding => Vec::new(),
+                _ => block_slice.to_vec(),
+            };
+
             blocks.push(MetadataBlock {
                 block_type,
                 is_last,
-                data: block_data,
+                data: store_data,
             });
 
             if is_last {

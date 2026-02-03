@@ -213,6 +213,9 @@ impl ID3Tags {
             } else {
                 ext_size + 4
             };
+            if offset >= data.len() {
+                return Ok(());
+            }
         }
 
         // Determine BPI for v2.4

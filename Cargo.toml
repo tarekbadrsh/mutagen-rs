@@ -15,9 +15,13 @@ encoding_rs = "0.8"
 byteorder = "1.5"
 flate2 = "1.0"
 memchr = "2.7"
+mimalloc = { version = "0.1", default-features = false }
+rayon = "1.10"
+itoa = "1.0"
+ryu = "1.0"
 
 [profile.release]
-lto = true
+lto = "fat"
 codegen-units = 1
 panic = "abort"
 strip = true

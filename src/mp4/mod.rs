@@ -88,11 +88,14 @@ impl MP4File {
     pub fn parse(data: &[u8], path: &str) -> Result<Self> {
         let atoms = parse_atoms(data, 0, data.len())?;
 
-        // Parse audio info from moov/trak/mdia/minf/stbl/stsd
-        let info = parse_mp4_info(data, &atoms)?;
+        // Find moov atom once and parse its children once
+        let moov = atoms.iter().find(|a| a.name == *b"moov")
+            .ok_or_else(|| MutagenError::MP4("No moov atom".into()))?;
+        let moov_children = parse_atoms(data, moov.data_offset, moov.data_offset + moov.data_size)?;
 
-        // Parse tags from moov/udta/meta/ilst
-        let tags = parse_mp4_tags(data, &atoms)?;
+        // Parse audio info and tags sharing the same moov children
+        let info = parse_mp4_info_from_moov(data, &moov_children)?;
+        let tags = parse_mp4_tags_from_moov(data, &moov_children)?;
 
         Ok(MP4File {
             info,
@@ -125,13 +128,8 @@ impl MP4File {
     }
 }
 
-/// Parse MP4 audio info from the atom tree.
-fn parse_mp4_info(data: &[u8], atoms: &[Atom]) -> Result<MP4Info> {
-    // Find moov atom
-    let moov = atoms.iter().find(|a| a.name == *b"moov")
-        .ok_or_else(|| MutagenError::MP4("No moov atom".into()))?;
-
-    let moov_children = parse_atoms(data, moov.data_offset, moov.data_offset + moov.data_size)?;
+/// Parse MP4 audio info from pre-parsed moov children.
+fn parse_mp4_info_from_moov(data: &[u8], moov_children: &[Atom]) -> Result<MP4Info> {
 
     // Find mvhd for duration info
     let mut duration = 0u64;
@@ -238,17 +236,11 @@ fn parse_mp4_info(data: &[u8], atoms: &[Atom]) -> Result<MP4Info> {
     })
 }
 
-/// Parse MP4 tags from ilst atom.
-fn parse_mp4_tags(data: &[u8], atoms: &[Atom]) -> Result<MP4Tags> {
+/// Parse MP4 tags from pre-parsed moov children.
+fn parse_mp4_tags_from_moov(data: &[u8], moov_children: &[Atom]) -> Result<MP4Tags> {
     let mut tags = MP4Tags::new();
 
-    // Navigate: moov/udta/meta/ilst
-    let moov = match atoms.iter().find(|a| a.name == *b"moov") {
-        Some(a) => a,
-        None => return Ok(tags),
-    };
-
-    let moov_children = parse_atoms(data, moov.data_offset, moov.data_offset + moov.data_size)?;
+    // Navigate: udta/meta/ilst within moov children
     let udta = match moov_children.iter().find(|a| a.name == *b"udta") {
         Some(a) => a,
         None => return Ok(tags),

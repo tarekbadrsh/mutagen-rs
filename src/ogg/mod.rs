@@ -20,6 +20,7 @@ pub struct OggPage {
 
 impl OggPage {
     /// Parse an OGG page from data at the given offset.
+    #[inline]
     pub fn parse(data: &[u8], offset: usize) -> Result<Self> {
         if offset + 27 > data.len() {
             return Err(MutagenError::Ogg("Page header too short".into()));
@@ -106,29 +107,53 @@ impl OggPage {
 
     /// Find the last OGG page in the data (scanning backward).
     pub fn find_last(data: &[u8], serial: u32) -> Option<OggPage> {
-        // Scan backward from end for OggS magic
-        let mut pos = data.len().saturating_sub(65536); // Start max 64KB from end
-        if pos < 4 {
-            pos = 0;
+        // Use find_last_granule for the common case, fall back to full parse only if needed
+        if let Some(granule) = find_last_granule(data, serial) {
+            // Build a minimal OggPage with just the granule position
+            return Some(OggPage {
+                version: 0,
+                header_type: 0,
+                granule_position: granule,
+                serial_number: serial,
+                page_sequence: 0,
+                checksum: 0,
+                segments: Vec::new(),
+                packets: Vec::new(),
+                offset: 0,
+                size: 0,
+            });
         }
-
-        let mut last_page = None;
-
-        while pos + 4 < data.len() {
-            if &data[pos..pos + 4] == b"OggS" {
-                if let Ok(page) = OggPage::parse(data, pos) {
-                    if page.serial_number == serial {
-                        last_page = Some(page.clone());
-                    }
-                    pos += page.size;
-                    continue;
-                }
-            }
-            pos += 1;
-        }
-
-        last_page
+        None
     }
+}
+
+/// Find the granule position of the last OGG page with the given serial number.
+/// Zero-allocation: only reads the 27-byte page header, no packet reassembly.
+#[inline]
+pub fn find_last_granule(data: &[u8], serial: u32) -> Option<i64> {
+    use memchr::memmem;
+
+    let search_start = data.len().saturating_sub(65536);
+    let search_data = &data[search_start..];
+
+    // Use SIMD-accelerated reverse search for "OggS" magic
+    for pos in memmem::rfind_iter(search_data, b"OggS") {
+        let abs_pos = search_start + pos;
+        if abs_pos + 27 > data.len() {
+            continue;
+        }
+        let d = &data[abs_pos..];
+        // serial_number at offset 14-17
+        let page_serial = u32::from_le_bytes([d[14], d[15], d[16], d[17]]);
+        if page_serial == serial {
+            // granule_position at offset 6-13
+            let granule = i64::from_le_bytes([
+                d[6], d[7], d[8], d[9], d[10], d[11], d[12], d[13],
+            ]);
+            return Some(granule);
+        }
+    }
+    None
 }
 
 /// Parsed OGG Vorbis audio info.
@@ -204,10 +229,10 @@ impl OggVorbisFile {
 
         let tags = VorbisComment::parse(&comment_data[7..], true)?;
 
-        // Calculate duration from last page
-        let length = if let Some(last_page) = OggPage::find_last(data, first_page.serial_number) {
-            if last_page.granule_position > 0 && sample_rate > 0 {
-                last_page.granule_position as f64 / sample_rate as f64
+        // Calculate duration from last page (zero-alloc: only reads header)
+        let length = if let Some(granule) = find_last_granule(data, first_page.serial_number) {
+            if granule > 0 && sample_rate > 0 {
+                granule as f64 / sample_rate as f64
             } else {
                 0.0
             }
@@ -301,12 +326,14 @@ impl OggVorbisFile {
         }
         if data.len() >= 4 && &data[0..4] == b"OggS" {
             score += 1;
-        }
-        // Check for vorbis identification
-        if data.len() >= 35 && &data[0..4] == b"OggS" {
-            if let Ok(page) = OggPage::parse(data, 0) {
-                if !page.packets.is_empty() && page.packets[0].len() >= 7 {
-                    if &page.packets[0][0..7] == b"\x01vorbis" {
+            // Inline check for Vorbis identification without full page parse.
+            // Page header: 27 bytes + segment_count segments.
+            // First packet starts right after segment table.
+            if data.len() >= 28 {
+                let num_segments = data[26] as usize;
+                let header_size = 27 + num_segments;
+                if header_size + 7 <= data.len() {
+                    if &data[header_size..header_size + 7] == b"\x01vorbis" {
                         score += 2;
                     }
                 }

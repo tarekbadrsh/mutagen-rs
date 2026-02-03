@@ -198,7 +198,9 @@ impl MP3File {
         let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
         if ext == "mp3" { score += 2; }
         if data.len() >= 3 && &data[0..3] == b"ID3" { score += 2; }
-        if find_sync(data, 0).is_some() { score += 1; }
+        // Limit sync scan to first 512 bytes for scoring performance
+        let scan_len = data.len().min(512);
+        if find_sync(&data[..scan_len], 0).is_some() { score += 1; }
         score
     }
 }

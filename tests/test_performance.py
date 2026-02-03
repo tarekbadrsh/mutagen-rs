@@ -221,6 +221,151 @@ def main():
         if not passed:
             all_passed = False
 
+    # Batch API benchmark with real unique file copies
+    import shutil
+    import tempfile
+
+    batch_dir = tempfile.mkdtemp(prefix="mutagen_batch_")
+    BATCH_COPIES = 40  # Create 40 copies of each file for batch parallelism
+
+    try:
+        # Create unique copies for realistic batch testing
+        batch_paths = {}  # {format: [paths]}
+        batch_all = []
+        for name_key in ["mp3", "flac", "ogg", "mp4"]:
+            paths = files.get(name_key, [])
+            valid_paths = []
+            for p in paths:
+                try:
+                    if name_key == "mp3": MP3(p)
+                    elif name_key == "flac": FLAC(p)
+                    elif name_key == "ogg": OggVorbis(p)
+                    elif name_key == "mp4": MP4(p)
+                    valid_paths.append(p)
+                except Exception:
+                    pass
+
+            copied = []
+            for i in range(BATCH_COPIES):
+                for p in valid_paths:
+                    base = os.path.basename(p)
+                    dest = os.path.join(batch_dir, f"copy{i}_{base}")
+                    if not os.path.exists(dest):
+                        shutil.copy2(p, dest)
+                    copied.append(dest)
+            batch_paths[name_key] = copied
+            batch_all.extend(copied)
+
+        # Warm the OS file cache
+        for p in batch_all[:100]:
+            with open(p, "rb") as f:
+                f.read()
+
+        print(f"\n{'='*50}")
+        print(f"BATCH API BENCHMARK (rayon parallel, {BATCH_COPIES} copies)")
+        print(f"{'='*50}\n")
+
+        format_cls = {"mp3": MP3, "flac": FLAC, "ogg": OggVorbis, "mp4": MP4}
+
+        for name_key, orig_cls in format_cls.items():
+            paths = batch_paths.get(name_key, [])
+            if not paths:
+                continue
+
+            n_files = len(paths)
+            iters = max(20, ITERATIONS // 2)
+            print(f"Batch {name_key} ({n_files} unique files)...")
+
+            # Original: sequential with full tag access
+            orig_time = benchmark_original(name_key, orig_cls, paths, iters)
+
+            # Rust batch
+            for _ in range(5):
+                mutagen_rs.batch_open(paths)
+
+            times = []
+            for _ in range(iters):
+                start = time.perf_counter()
+                mutagen_rs.batch_open(paths)
+                times.append(time.perf_counter() - start)
+            batch_time = min(times)
+
+            speedup = orig_time / batch_time if batch_time > 0 else float('inf')
+            passed = speedup >= 100.0
+
+            results[f"batch_{name_key}"] = {
+                "files": n_files,
+                "original_ms_per_file": (orig_time / n_files) * 1000,
+                "rust_batch_ms_per_file": (batch_time / n_files) * 1000,
+                "speedup": speedup,
+                "passed": passed,
+            }
+
+            status = "PASS" if passed else "FAIL"
+            print(f"  Original:    {(orig_time / n_files) * 1000:.4f} ms/file")
+            print(f"  Rust batch:  {(batch_time / n_files) * 1000:.4f} ms/file  {speedup:.1f}x [{status}]")
+            print()
+
+            if not passed:
+                all_passed = False
+
+        # Batch all files
+        if batch_all:
+            n_auto = len(batch_all)
+            iters = max(20, ITERATIONS // 2)
+            print(f"Batch auto-detect ({n_auto} unique files)...")
+
+            # Original sequential with full tag access
+            times = []
+            for _ in range(iters):
+                start = time.perf_counter()
+                for p in batch_all:
+                    try:
+                        f = mutagen.File(p)
+                        if f and hasattr(f, 'info') and f.info:
+                            _ = f.info.length
+                        if f and f.tags:
+                            for k in f.tags.keys():
+                                _ = f.tags[k]
+                    except Exception:
+                        pass
+                times.append(time.perf_counter() - start)
+            orig_time = min(times)
+
+            # Rust batch
+            for _ in range(5):
+                mutagen_rs.batch_open(batch_all)
+            times = []
+            for _ in range(iters):
+                start = time.perf_counter()
+                mutagen_rs.batch_open(batch_all)
+                times.append(time.perf_counter() - start)
+            batch_time = min(times)
+
+            speedup = orig_time / batch_time if batch_time > 0 else float('inf')
+            passed = speedup >= 100.0
+
+            results["batch_auto_detect"] = {
+                "files": n_auto,
+                "original_ms_per_file": (orig_time / n_auto) * 1000,
+                "rust_batch_ms_per_file": (batch_time / n_auto) * 1000,
+                "speedup": speedup,
+                "passed": passed,
+            }
+
+            status = "PASS" if passed else "FAIL"
+            print(f"  Original:    {(orig_time / n_auto) * 1000:.4f} ms/file")
+            print(f"  Rust batch:  {(batch_time / n_auto) * 1000:.4f} ms/file  {speedup:.1f}x [{status}]")
+
+            if not passed:
+                all_passed = False
+
+    finally:
+        shutil.rmtree(batch_dir, ignore_errors=True)
+
+        if not passed:
+            all_passed = False
+
     # Save results
     output_path = os.path.join(os.path.dirname(os.path.dirname(__file__)), "performance_results.json")
     with open(output_path, "w") as f:

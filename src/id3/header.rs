@@ -124,7 +124,9 @@ pub fn determine_bpi(data: &[u8], frames_end: usize) -> u8 {
     let mut syncsafe_valid = 0u32;
     let mut normal_valid = 0u32;
 
-    while pos_syncsafe < frames_end.saturating_sub(10) {
+    let end = frames_end.min(data.len());
+
+    while pos_syncsafe + 10 <= end && pos_syncsafe < end.saturating_sub(10) {
         if data[pos_syncsafe] == 0 {
             break;
         }
@@ -134,14 +136,14 @@ pub fn determine_bpi(data: &[u8], frames_end: usize) -> u8 {
             break;
         }
         let size = BitPaddedInt::syncsafe(&data[pos_syncsafe + 4..pos_syncsafe + 8]) as usize;
-        if size == 0 || pos_syncsafe + 10 + size > frames_end {
+        if size == 0 || pos_syncsafe + 10 + size > end {
             break;
         }
         syncsafe_valid += 1;
         pos_syncsafe += 10 + size;
     }
 
-    while pos_normal < frames_end.saturating_sub(10) {
+    while pos_normal + 10 <= end && pos_normal < end.saturating_sub(10) {
         if data[pos_normal] == 0 {
             break;
         }
@@ -150,7 +152,7 @@ pub fn determine_bpi(data: &[u8], frames_end: usize) -> u8 {
             break;
         }
         let size = BitPaddedInt::normal(&data[pos_normal + 4..pos_normal + 8]) as usize;
-        if size == 0 || pos_normal + 10 + size > frames_end {
+        if size == 0 || pos_normal + 10 + size > end {
             break;
         }
         normal_valid += 1;
