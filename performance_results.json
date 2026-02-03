@@ -1,0 +1,37 @@
+{
+  "mp3": {
+    "files": 19,
+    "original_ms_per_file": 0.14685089454839104,
+    "rust_ms_per_file": 0.0011195232601542223,
+    "speedup": 131.1727051818122,
+    "passed": true
+  },
+  "flac": {
+    "files": 6,
+    "original_ms_per_file": 0.06805899708221357,
+    "rust_ms_per_file": 0.0005516534050305685,
+    "speedup": 123.37274901519415,
+    "passed": true
+  },
+  "ogg": {
+    "files": 3,
+    "original_ms_per_file": 0.1500816239664952,
+    "rust_ms_per_file": 0.0009066425263881683,
+    "speedup": 165.5356103406951,
+    "passed": true
+  },
+  "mp4": {
+    "files": 9,
+    "original_ms_per_file": 0.13707244458297888,
+    "rust_ms_per_file": 0.0009211038963662254,
+    "speedup": 148.81322847914618,
+    "passed": true
+  },
+  "auto_detect": {
+    "files": 37,
+    "original_ms_per_file": 0.17213251290691864,
+    "rust_ms_per_file": 0.000465132698819444,
+    "speedup": 370.0718383029385,
+    "passed": true
+  }
+}

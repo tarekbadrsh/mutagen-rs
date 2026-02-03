@@ -1,0 +1,47 @@
+{
+  "mp3": {
+    "format": "mp3",
+    "files": 21,
+    "iterations": 100,
+    "avg_time_s": 0.0032627739710733294,
+    "best_time_s": 0.003042020834982395,
+    "avg_per_file_ms": 0.15537018909872996,
+    "best_per_file_ms": 0.1448581349991617
+  },
+  "flac": {
+    "format": "flac",
+    "files": 9,
+    "iterations": 100,
+    "avg_time_s": 0.0005570056498982012,
+    "best_time_s": 0.0005390429869294167,
+    "avg_per_file_ms": 0.06188951665535568,
+    "best_per_file_ms": 0.05989366521437963
+  },
+  "ogg": {
+    "format": "ogg",
+    "files": 3,
+    "iterations": 100,
+    "avg_time_s": 0.00030802326742559674,
+    "best_time_s": 0.0002943419385701418,
+    "avg_per_file_ms": 0.10267442247519891,
+    "best_per_file_ms": 0.09811397952338059
+  },
+  "mp4": {
+    "format": "mp4",
+    "files": 9,
+    "iterations": 100,
+    "avg_time_s": 0.0012736400775611402,
+    "best_time_s": 0.0012377179227769375,
+    "avg_per_file_ms": 0.14151556417346003,
+    "best_per_file_ms": 0.13752421364188194
+  },
+  "auto_detect": {
+    "format": "auto_detect",
+    "files": 42,
+    "iterations": 100,
+    "avg_time_s": 0.0072969143255613746,
+    "best_time_s": 0.006770565873011947,
+    "avg_per_file_ms": 0.17373605537050893,
+    "best_per_file_ms": 0.16120394935742732
+  }
+}
