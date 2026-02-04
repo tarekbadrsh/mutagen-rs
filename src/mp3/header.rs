@@ -113,7 +113,7 @@ pub struct MPEGFrame {
 
 impl MPEGFrame {
     /// Parse a 4-byte MPEG frame header.
-    #[inline]
+    #[inline(always)]
     pub fn parse(header_bytes: &[u8]) -> Result<Self> {
         if header_bytes.len() < 4 {
             return Err(MutagenError::MP3("Frame header too short".into()));
@@ -222,7 +222,7 @@ impl MPEGFrame {
 
 /// Scan for the first valid MPEG sync frame in data.
 /// Returns the offset and parsed frame if found.
-#[inline]
+#[inline(always)]
 pub fn find_sync(data: &[u8], start: usize) -> Option<(usize, MPEGFrame)> {
     use memchr::memchr;
 

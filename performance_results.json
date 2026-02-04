@@ -1,72 +1,72 @@
 {
   "mp3": {
     "files": 19,
-    "original_ms_per_file": 0.14779841723410705,
-    "rust_ms_per_file": 0.007746851463851176,
-    "speedup": 19.078514403402846,
+    "original_ms_per_file": 0.14736647962739594,
+    "rust_ms_per_file": 0.008253956605729303,
+    "speedup": 17.854040997150953,
     "passed": false
   },
   "flac": {
     "files": 6,
-    "original_ms_per_file": 0.06896820074568193,
-    "rust_ms_per_file": 0.009415011542538801,
-    "speedup": 7.325344258376163,
+    "original_ms_per_file": 0.06750951676319043,
+    "rust_ms_per_file": 0.009249662980437279,
+    "speedup": 7.298592057458823,
     "passed": false
   },
   "ogg": {
     "files": 3,
-    "original_ms_per_file": 0.15846973595519862,
-    "rust_ms_per_file": 0.013573328033089638,
-    "speedup": 11.675083337621718,
+    "original_ms_per_file": 0.1510152748475472,
+    "rust_ms_per_file": 0.012456361825267473,
+    "speedup": 12.123545941096205,
     "passed": false
   },
   "mp4": {
     "files": 9,
-    "original_ms_per_file": 0.1379810014946593,
-    "rust_ms_per_file": 0.008923337898320623,
-    "speedup": 15.462935850566348,
+    "original_ms_per_file": 0.1375257917162445,
+    "rust_ms_per_file": 0.009130893482102288,
+    "speedup": 15.061591944513701,
     "passed": false
   },
   "auto_detect": {
     "files": 37,
-    "original_ms_per_file": 0.17469481414032947,
-    "rust_ms_per_file": 0.008462166816398903,
-    "speedup": 20.644217719956423,
+    "original_ms_per_file": 0.1685037025930108,
+    "rust_ms_per_file": 0.009350516405459997,
+    "speedup": 18.020791075733246,
     "passed": false
   },
   "batch_mp3": {
     "files": 760,
-    "original_ms_per_file": 0.15032828025715916,
-    "rust_batch_ms_per_file": 0.00127247369259988,
-    "speedup": 118.1386154632501,
+    "original_ms_per_file": 0.14902647235430777,
+    "rust_batch_ms_per_file": 0.0014019183397881295,
+    "speedup": 106.3018209582949,
     "passed": true
   },
   "batch_flac": {
     "files": 280,
-    "original_ms_per_file": 0.06679508618877403,
-    "rust_batch_ms_per_file": 0.002824214087533099,
-    "speedup": 23.650857944384217,
+    "original_ms_per_file": 0.06626851391047239,
+    "rust_batch_ms_per_file": 0.0026752781455538104,
+    "speedup": 24.770700579529507,
     "passed": false
   },
   "batch_ogg": {
     "files": 120,
-    "original_ms_per_file": 0.10347013400557141,
-    "rust_batch_ms_per_file": 0.003990084708978732,
-    "speedup": 25.931813871704676,
+    "original_ms_per_file": 0.10370440819921593,
+    "rust_batch_ms_per_file": 0.006171484710648656,
+    "speedup": 16.803802174260923,
     "passed": false
   },
   "batch_mp4": {
     "files": 360,
-    "original_ms_per_file": 0.14364217770182425,
-    "rust_batch_ms_per_file": 0.002498444195629822,
-    "speedup": 57.492650007183414,
+    "original_ms_per_file": 0.1444295165129006,
+    "rust_batch_ms_per_file": 0.0022743220648003947,
+    "speedup": 63.50442566962318,
     "passed": false
   },
   "batch_auto_detect": {
     "files": 1520,
-    "original_ms_per_file": 0.1740498664347749,
-    "rust_batch_ms_per_file": 0.0016776645727651683,
-    "speedup": 103.745331015664,
+    "original_ms_per_file": 0.17374204732110038,
+    "rust_batch_ms_per_file": 0.0016710073013152733,
+    "speedup": 103.97443936022637,
     "passed": true
   }
 }

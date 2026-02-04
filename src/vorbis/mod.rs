@@ -132,11 +132,11 @@ impl VorbisComment {
     }
 
     /// Get all values for a key (case-insensitive).
+    #[inline(always)]
     pub fn get(&self, key: &str) -> Vec<&str> {
-        let upper = key.to_uppercase();
         self.comments
             .iter()
-            .filter(|(k, _)| k == &upper)
+            .filter(|(k, _)| k.eq_ignore_ascii_case(key))
             .map(|(_, v)| v.as_str())
             .collect()
     }
@@ -156,12 +156,13 @@ impl VorbisComment {
         self.comments.retain(|(k, _)| k != &upper);
     }
 
-    /// Get all unique keys.
+    /// Get all unique keys. Uses linear scan instead of HashSet for
+    /// typical small key counts (5-15 unique keys).
+    #[inline(always)]
     pub fn keys(&self) -> Vec<String> {
-        let mut seen = std::collections::HashSet::new();
-        let mut keys = Vec::new();
+        let mut keys = Vec::with_capacity(8);
         for (k, _) in &self.comments {
-            if seen.insert(k.clone()) {
+            if !keys.iter().any(|existing: &String| existing == k) {
                 keys.push(k.clone());
             }
         }

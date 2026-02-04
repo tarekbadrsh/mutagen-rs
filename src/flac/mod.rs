@@ -440,8 +440,8 @@ impl FLACFile {
     pub fn score(path: &str, data: &[u8]) -> u32 {
         let mut score = 0u32;
 
-        let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-        if ext == "flac" {
+        let ext = path.rsplit('.').next().unwrap_or("");
+        if ext.eq_ignore_ascii_case("flac") {
             score += 2;
         }
 

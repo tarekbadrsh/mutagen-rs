@@ -79,6 +79,7 @@ def benchmark_rust(name, cls_name, paths, iterations=ITERATIONS):
 
     times = []
     for _ in range(iterations):
+        mutagen_rs.clear_cache()
         start = time.perf_counter()
         for p in paths:
             try:
@@ -194,6 +195,7 @@ def main():
         # Rust
         times = []
         for _ in range(ITERATIONS):
+            mutagen_rs.clear_cache()
             start = time.perf_counter()
             for p in valid_auto:
                 try:
@@ -279,14 +281,14 @@ def main():
             # Original: sequential with full tag access
             orig_time = benchmark_original(name_key, orig_cls, paths, iters)
 
-            # Rust batch
+            # Rust batch (bypass Python cache, measure actual parsing)
             for _ in range(5):
-                mutagen_rs.batch_open(paths)
+                mutagen_rs._rust_batch_open(paths)
 
             times = []
             for _ in range(iters):
                 start = time.perf_counter()
-                mutagen_rs.batch_open(paths)
+                mutagen_rs._rust_batch_open(paths)
                 times.append(time.perf_counter() - start)
             batch_time = min(times)
 
@@ -332,13 +334,13 @@ def main():
                 times.append(time.perf_counter() - start)
             orig_time = min(times)
 
-            # Rust batch
+            # Rust batch (bypass Python cache, measure actual parsing)
             for _ in range(5):
-                mutagen_rs.batch_open(batch_all)
+                mutagen_rs._rust_batch_open(batch_all)
             times = []
             for _ in range(iters):
                 start = time.perf_counter()
-                mutagen_rs.batch_open(batch_all)
+                mutagen_rs._rust_batch_open(batch_all)
                 times.append(time.perf_counter() - start)
             batch_time = min(times)
 

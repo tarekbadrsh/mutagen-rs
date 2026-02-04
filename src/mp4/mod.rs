@@ -111,8 +111,9 @@ impl MP4File {
 
     pub fn score(path: &str, data: &[u8]) -> u32 {
         let mut score = 0u32;
-        let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-        if ext == "m4a" || ext == "m4b" || ext == "mp4" || ext == "m4v" {
+        let ext = path.rsplit('.').next().unwrap_or("");
+        if ext.eq_ignore_ascii_case("m4a") || ext.eq_ignore_ascii_case("m4b")
+            || ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("m4v") {
             score += 2;
         }
 

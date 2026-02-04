@@ -9,8 +9,6 @@ pub mod vorbis;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyBytes, PyTuple};
 use pyo3::exceptions::{PyValueError, PyKeyError, PyIOError};
-use pyo3::{Py};
-use std::collections::HashMap;
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
@@ -203,33 +201,23 @@ struct PyMP3 {
     #[pyo3(get)]
     filename: String,
     id3: PyID3,
-    // Pre-computed Python values for fast access
-    tag_value_cache: HashMap<String, PyObject>,
-    tag_keys_cache: Vec<String>,
 }
 
 impl PyMP3 {
-    fn from_data(py: Python<'_>, data: &[u8], filename: &str) -> PyResult<Self> {
+    #[inline(always)]
+    fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
         let mp3_file = mp3::MP3File::parse(data, filename)?;
-
         let info = make_mpeg_info(&mp3_file.info);
         let version = mp3_file.id3_header.as_ref().map(|h| h.version).unwrap_or((4, 0));
-
-        let mut tags = mp3_file.tags;
-        let (tag_keys, tag_py_values) = precompute_id3_py_values(py, &mut tags);
-
-        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.into_iter().collect();
 
         Ok(PyMP3 {
             info,
             filename: filename.to_string(),
             id3: PyID3 {
-                tags,
+                tags: mp3_file.tags,
                 path: Some(filename.to_string()),
                 version,
             },
-            tag_value_cache,
-            tag_keys_cache: tag_keys,
         })
     }
 }
@@ -237,10 +225,10 @@ impl PyMP3 {
 #[pymethods]
 impl PyMP3 {
     #[new]
-    fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
+    fn new(filename: &str) -> PyResult<Self> {
         let data = std::fs::read(filename)
             .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
-        Self::from_data(py, &data, filename)
+        Self::from_data(&data, filename)
     }
 
     #[getter]
@@ -254,19 +242,19 @@ impl PyMP3 {
     }
 
     fn keys(&self) -> Vec<String> {
-        self.tag_keys_cache.clone()
+        self.id3.tags.keys()
     }
 
-    fn __getitem__(&self, py: Python, key: &str) -> PyResult<PyObject> {
-        // Use pre-computed cache for fast access
-        match self.tag_value_cache.get(key) {
-            Some(v) => Ok(v.clone_ref(py)),
+    #[inline(always)]
+    fn __getitem__(&mut self, py: Python, key: &str) -> PyResult<PyObject> {
+        match self.id3.tags.get_mut(key) {
+            Some(frame) => Ok(frame_to_py(py, frame)),
             None => Err(PyKeyError::new_err(key.to_string())),
         }
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.tag_value_cache.contains_key(key)
+        self.id3.tags.get(key).is_some()
     }
 
     fn __repr__(&self) -> String {
@@ -342,13 +330,13 @@ impl PyVComment {
         self.vc.keys()
     }
 
+    #[inline(always)]
     fn __getitem__(&self, py: Python, key: &str) -> PyResult<PyObject> {
         let values = self.vc.get(key);
         if values.is_empty() {
             return Err(PyKeyError::new_err(key.to_string()));
         }
-        let list: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-        Ok(PyList::new(py, &list)?.into())
+        Ok(PyList::new(py, values)?.into_any().unbind())
     }
 
     fn __setitem__(&mut self, key: &str, value: &Bound<'_, PyAny>) -> PyResult<()> {
@@ -391,17 +379,17 @@ impl PyVComment {
 /// FLAC file.
 #[pyclass(name = "FLAC")]
 struct PyFLAC {
-    info_py: PyObject,
+    #[pyo3(get)]
+    info: PyStreamInfo,
     #[pyo3(get)]
     filename: String,
-    tag_keys_py: PyObject,
-    tag_py_values: Vec<(String, PyObject)>,
     flac_file: flac::FLACFile,
     vc_data: vorbis::VorbisComment,
 }
 
 impl PyFLAC {
-    fn from_data(py: Python<'_>, data: &[u8], filename: &str) -> PyResult<Self> {
+    #[inline(always)]
+    fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
         let flac_file = flac::FLACFile::parse(data, filename)?;
 
         let info = PyStreamInfo {
@@ -416,18 +404,11 @@ impl PyFLAC {
             max_frame_size: flac_file.info.max_frame_size,
         };
 
-        let info_py = Py::new(py, info)?.into_any();
-
         let vc_data = flac_file.tags.clone().unwrap_or_else(|| vorbis::VorbisComment::new());
-        let (tag_keys, tag_py_values) = precompute_vc_py_values(py, &vc_data);
-
-        let tag_keys_py = PyList::new(py, &tag_keys)?.into_any().unbind();
 
         Ok(PyFLAC {
-            info_py,
+            info,
             filename: filename.to_string(),
-            tag_keys_py,
-            tag_py_values,
             flac_file,
             vc_data,
         })
@@ -437,15 +418,10 @@ impl PyFLAC {
 #[pymethods]
 impl PyFLAC {
     #[new]
-    fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
+    fn new(filename: &str) -> PyResult<Self> {
         let data = std::fs::read(filename)
             .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
-        Self::from_data(py, &data, filename)
-    }
-
-    #[getter]
-    fn info(&self, py: Python) -> PyObject {
-        self.info_py.clone_ref(py)
+        Self::from_data(&data, filename)
     }
 
     #[getter]
@@ -455,21 +431,21 @@ impl PyFLAC {
         Ok(pvc.into_pyobject(py)?.into_any().unbind())
     }
 
-    fn keys(&self, py: Python) -> PyObject {
-        self.tag_keys_py.clone_ref(py)
+    fn keys(&self) -> Vec<String> {
+        self.vc_data.keys()
     }
 
+    #[inline(always)]
     fn __getitem__(&self, py: Python, key: &str) -> PyResult<PyObject> {
-        for (k, v) in self.tag_py_values.iter() {
-            if k == key {
-                return Ok(v.clone_ref(py));
-            }
+        let values = self.vc_data.get(key);
+        if values.is_empty() {
+            return Err(PyKeyError::new_err(key.to_string()));
         }
-        Err(PyKeyError::new_err(key.to_string()))
+        Ok(PyList::new(py, values)?.into_any().unbind())
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.tag_py_values.iter().any(|(k, _)| k == key)
+        !self.vc_data.get(key).is_empty()
     }
 
     fn __repr__(&self) -> String {
@@ -522,12 +498,11 @@ struct PyOggVorbis {
     #[pyo3(get)]
     filename: String,
     vc: PyVComment,
-    tag_value_cache: HashMap<String, PyObject>,
-    tag_keys_cache: Vec<String>,
 }
 
 impl PyOggVorbis {
-    fn from_data(py: Python<'_>, data: &[u8], filename: &str) -> PyResult<Self> {
+    #[inline(always)]
+    fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
         let ogg_file = ogg::OggVorbisFile::parse(data, filename)?;
 
         let info = PyOggVorbisInfo {
@@ -536,9 +511,6 @@ impl PyOggVorbis {
             sample_rate: ogg_file.info.sample_rate,
             bitrate: ogg_file.info.bitrate,
         };
-
-        let (tag_keys, tag_py_values) = precompute_vc_py_values(py, &ogg_file.tags);
-        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.into_iter().collect();
 
         let vc = PyVComment {
             vc: ogg_file.tags,
@@ -549,8 +521,6 @@ impl PyOggVorbis {
             info,
             filename: filename.to_string(),
             vc,
-            tag_value_cache,
-            tag_keys_cache: tag_keys,
         })
     }
 }
@@ -558,10 +528,10 @@ impl PyOggVorbis {
 #[pymethods]
 impl PyOggVorbis {
     #[new]
-    fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
+    fn new(filename: &str) -> PyResult<Self> {
         let data = std::fs::read(filename)
             .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
-        Self::from_data(py, &data, filename)
+        Self::from_data(&data, filename)
     }
 
     #[getter]
@@ -571,18 +541,20 @@ impl PyOggVorbis {
     }
 
     fn keys(&self) -> Vec<String> {
-        self.tag_keys_cache.clone()
+        self.vc.vc.keys()
     }
 
+    #[inline(always)]
     fn __getitem__(&self, py: Python, key: &str) -> PyResult<PyObject> {
-        match self.tag_value_cache.get(key) {
-            Some(v) => Ok(v.clone_ref(py)),
-            None => Err(PyKeyError::new_err(key.to_string())),
+        let values = self.vc.vc.get(key);
+        if values.is_empty() {
+            return Err(PyKeyError::new_err(key.to_string()));
         }
+        Ok(PyList::new(py, values)?.into_any().unbind())
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.tag_value_cache.contains_key(key)
+        !self.vc.vc.get(key).is_empty()
     }
 
     fn __repr__(&self) -> String {
@@ -679,12 +651,11 @@ struct PyMP4 {
     #[pyo3(get)]
     filename: String,
     mp4_tags: PyMP4Tags,
-    tag_value_cache: HashMap<String, PyObject>,
-    tag_keys_cache: Vec<String>,
 }
 
 impl PyMP4 {
-    fn from_data(py: Python<'_>, data: &[u8], filename: &str) -> PyResult<Self> {
+    #[inline(always)]
+    fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
         let mp4_file = mp4::MP4File::parse(data, filename)?;
 
         let info = PyMP4Info {
@@ -697,9 +668,6 @@ impl PyMP4 {
             codec_description: mp4_file.info.codec_description,
         };
 
-        let (tag_keys, tag_py_values) = precompute_mp4_py_values(py, &mp4_file.tags);
-        let tag_value_cache: HashMap<String, PyObject> = tag_py_values.into_iter().collect();
-
         let mp4_tags = PyMP4Tags {
             tags: mp4_file.tags,
         };
@@ -708,8 +676,6 @@ impl PyMP4 {
             info,
             filename: filename.to_string(),
             mp4_tags,
-            tag_value_cache,
-            tag_keys_cache: tag_keys,
         })
     }
 }
@@ -717,10 +683,10 @@ impl PyMP4 {
 #[pymethods]
 impl PyMP4 {
     #[new]
-    fn new(py: Python<'_>, filename: &str) -> PyResult<Self> {
+    fn new(filename: &str) -> PyResult<Self> {
         let data = std::fs::read(filename)
             .map_err(|e| PyIOError::new_err(format!("{}", e)))?;
-        Self::from_data(py, &data, filename)
+        Self::from_data(&data, filename)
     }
 
     #[getter]
@@ -730,18 +696,19 @@ impl PyMP4 {
     }
 
     fn keys(&self) -> Vec<String> {
-        self.tag_keys_cache.clone()
+        self.mp4_tags.tags.keys()
     }
 
+    #[inline(always)]
     fn __getitem__(&self, py: Python, key: &str) -> PyResult<PyObject> {
-        match self.tag_value_cache.get(key) {
-            Some(v) => Ok(v.clone_ref(py)),
+        match self.mp4_tags.tags.get(key) {
+            Some(value) => mp4_value_to_py(py, value),
             None => Err(PyKeyError::new_err(key.to_string())),
         }
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.tag_value_cache.contains_key(key)
+        self.mp4_tags.tags.items.contains_key(key)
     }
 
     fn __repr__(&self) -> String {
@@ -751,6 +718,7 @@ impl PyMP4 {
 
 // ---- Helper functions ----
 
+#[inline(always)]
 fn make_mpeg_info(info: &mp3::MPEGInfo) -> PyMPEGInfo {
     PyMPEGInfo {
         length: info.length,
@@ -775,60 +743,7 @@ fn make_mpeg_info(info: &mp3::MPEGInfo) -> PyMPEGInfo {
     }
 }
 
-/// Pre-compute Python values for all ID3 tags (single pass: decode + convert).
-fn precompute_id3_py_values(py: Python, tags: &mut id3::tags::ID3Tags) -> (Vec<String>, Vec<(String, PyObject)>) {
-    let mut keys = Vec::with_capacity(tags.frames.len());
-    let mut values = Vec::with_capacity(tags.frames.len());
-
-    for (hash_key, frames) in tags.frames.iter_mut() {
-        keys.push(hash_key.0.clone());
-        if let Some(lf) = frames.first_mut() {
-            if let Ok(frame) = lf.decode() {
-                values.push((hash_key.0.clone(), frame_to_py(py, frame)));
-            }
-        }
-    }
-
-    (keys, values)
-}
-
-/// Pre-compute Python values for VorbisComment tags.
-fn precompute_vc_py_values(py: Python, vc: &vorbis::VorbisComment) -> (Vec<String>, Vec<(String, PyObject)>) {
-    let mut keys = Vec::new();
-    let mut values = Vec::new();
-
-    for key in vc.keys() {
-        let tag_values = vc.get(&key);
-        if !tag_values.is_empty() {
-            let list: Vec<String> = tag_values.iter().map(|s| s.to_string()).collect();
-            if let Ok(py_list) = PyList::new(py, &list) {
-                keys.push(key.clone());
-                values.push((key, py_list.into_any().unbind()));
-            }
-        }
-    }
-
-    (keys, values)
-}
-
-/// Pre-compute Python values for MP4 tags.
-fn precompute_mp4_py_values(py: Python, tags: &mp4::MP4Tags) -> (Vec<String>, Vec<(String, PyObject)>) {
-    let mut keys = Vec::new();
-    let mut values = Vec::new();
-
-    for key in tags.keys() {
-        if let Some(value) = tags.get(&key) {
-            if let Ok(py_val) = mp4_value_to_py(py, value) {
-                keys.push(key.clone());
-                values.push((key, py_val));
-            }
-        }
-    }
-
-    (keys, values)
-}
-
-#[inline]
+#[inline(always)]
 fn frame_to_py(py: Python, frame: &id3::frames::Frame) -> PyObject {
     match frame {
         id3::frames::Frame::Text(f) => {
@@ -885,7 +800,7 @@ fn frame_to_py(py: Python, frame: &id3::frames::Frame) -> PyObject {
     }
 }
 
-#[inline]
+#[inline(always)]
 fn mp4_value_to_py(py: Python, value: &mp4::MP4TagValue) -> PyResult<PyObject> {
     match value {
         mp4::MP4TagValue::Text(v) => {
@@ -967,7 +882,7 @@ struct PreSerializedFile {
 }
 
 /// Convert a Frame to a BatchTagValue (runs in parallel phase, no GIL needed).
-#[inline]
+#[inline(always)]
 fn frame_to_batch_value(frame: &id3::frames::Frame) -> BatchTagValue {
     match frame {
         id3::frames::Frame::Text(f) => {
@@ -1004,8 +919,275 @@ fn frame_to_batch_value(frame: &id3::frames::Frame) -> BatchTagValue {
     }
 }
 
+/// Parse VorbisComment data directly into batch tags — single-pass, minimal allocations.
+/// Skips vendor string, uses memchr for fast '=' finding, groups by key inline.
+#[inline(always)]
+fn parse_vc_to_batch_tags(data: &[u8]) -> Vec<(String, BatchTagValue)> {
+    if data.len() < 8 { return Vec::new(); }
+    let mut pos = 0usize;
+
+    // Skip vendor string
+    let vendor_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+    pos += 4;
+    if pos + vendor_len > data.len() { return Vec::new(); }
+    pos += vendor_len;
+
+    if pos + 4 > data.len() { return Vec::new(); }
+    let count = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+    pos += 4;
+
+    let mut tags: Vec<(String, BatchTagValue)> = Vec::with_capacity(count.min(64));
+
+    for _ in 0..count {
+        if pos + 4 > data.len() { break; }
+        let comment_len = u32::from_le_bytes([data[pos], data[pos+1], data[pos+2], data[pos+3]]) as usize;
+        pos += 4;
+        if pos + comment_len > data.len() { break; }
+
+        let raw = &data[pos..pos + comment_len];
+        pos += comment_len;
+
+        // Find '=' separator using memchr (SIMD-accelerated)
+        let eq_pos = match memchr::memchr(b'=', raw) {
+            Some(p) => p,
+            None => continue,
+        };
+
+        let key_bytes = &raw[..eq_pos];
+        let value_bytes = &raw[eq_pos + 1..];
+
+        // Key: uppercase ASCII. Fast path for already-uppercase keys.
+        let key = if key_bytes.iter().all(|&b| !b.is_ascii_lowercase()) {
+            match std::str::from_utf8(key_bytes) {
+                Ok(s) => s.to_string(),
+                Err(_) => continue,
+            }
+        } else {
+            // Fast ASCII uppercase (no allocation for checking)
+            let mut k = String::with_capacity(key_bytes.len());
+            for &b in key_bytes {
+                k.push(if b.is_ascii_lowercase() { (b - 32) as char } else { b as char });
+            }
+            k
+        };
+
+        // Value: zero-copy if valid UTF-8
+        let value = match std::str::from_utf8(value_bytes) {
+            Ok(s) => s.to_string(),
+            Err(_) => String::from_utf8_lossy(value_bytes).into_owned(),
+        };
+
+        // Group by key (linear scan — fast for typical 5-15 unique keys)
+        if let Some(entry) = tags.iter_mut().find(|(k, _)| k == &key) {
+            if let BatchTagValue::TextList(ref mut v) = entry.1 {
+                v.push(value);
+            }
+        } else {
+            tags.push((key, BatchTagValue::TextList(vec![value])));
+        }
+    }
+
+    tags
+}
+
+/// Batch-optimized FLAC parser: skips pictures, direct VC parsing.
+#[inline(always)]
+fn parse_flac_batch(data: &[u8]) -> Option<PreSerializedFile> {
+    let flac_offset = if data.len() >= 4 && &data[0..4] == b"fLaC" {
+        0
+    } else if data.len() >= 10 && &data[0..3] == b"ID3" {
+        let size = crate::id3::header::BitPaddedInt::syncsafe(&data[6..10]) as usize;
+        let off = 10 + size;
+        if off + 4 > data.len() || &data[off..off+4] != b"fLaC" { return None; }
+        off
+    } else {
+        return None;
+    };
+
+    let mut pos = flac_offset + 4;
+    let mut sample_rate = 0u32;
+    let mut channels = 0u8;
+    let mut length = 0.0f64;
+    let mut tags = Vec::new();
+
+    loop {
+        if pos + 4 > data.len() { break; }
+        let header = data[pos];
+        let is_last = header & 0x80 != 0;
+        let bt = header & 0x7F;
+        let block_size = ((data[pos+1] as usize) << 16) | ((data[pos+2] as usize) << 8) | (data[pos+3] as usize);
+        pos += 4;
+        if pos + block_size > data.len() { break; }
+
+        match bt {
+            0 => {
+                if let Ok(si) = flac::StreamInfo::parse(&data[pos..pos+block_size]) {
+                    sample_rate = si.sample_rate;
+                    channels = si.channels;
+                    length = si.length;
+                }
+            }
+            4 => {
+                tags = parse_vc_to_batch_tags(&data[pos..pos+block_size]);
+            }
+            _ => {}
+        }
+
+        pos += block_size;
+        if is_last { break; }
+    }
+
+    if sample_rate == 0 { return None; }
+
+    Some(PreSerializedFile {
+        length,
+        sample_rate,
+        channels: channels as u32,
+        bitrate: None,
+        tags,
+    })
+}
+
+/// Batch-optimized OGG Vorbis parser: inline page headers, direct VC parsing.
+#[inline(always)]
+fn parse_ogg_batch(data: &[u8]) -> Option<PreSerializedFile> {
+    if data.len() < 58 || &data[0..4] != b"OggS" { return None; }
+
+    let serial = u32::from_le_bytes([data[14], data[15], data[16], data[17]]);
+    let num_seg = data[26] as usize;
+    let seg_table_end = 27 + num_seg;
+    if seg_table_end > data.len() { return None; }
+
+    let page_data_size: usize = data[27..seg_table_end].iter().map(|&s| s as usize).sum();
+    let first_page_end = seg_table_end + page_data_size;
+
+    if seg_table_end + 30 > data.len() { return None; }
+    let id_data = &data[seg_table_end..];
+    if id_data.len() < 30 || &id_data[0..7] != b"\x01vorbis" { return None; }
+
+    let channels = id_data[11];
+    let sample_rate = u32::from_le_bytes([id_data[12], id_data[13], id_data[14], id_data[15]]);
+
+    if first_page_end + 27 > data.len() { return None; }
+    if &data[first_page_end..first_page_end+4] != b"OggS" { return None; }
+
+    let seg2_count = data[first_page_end + 26] as usize;
+    let seg2_table_start = first_page_end + 27;
+    let seg2_table_end = seg2_table_start + seg2_count;
+    if seg2_table_end > data.len() { return None; }
+
+    let seg2_table = &data[seg2_table_start..seg2_table_end];
+    let mut first_packet_size = 0usize;
+    for &seg in seg2_table {
+        first_packet_size += seg as usize;
+        if seg < 255 { break; }
+    }
+
+    let comment_start = seg2_table_end;
+    if comment_start + first_packet_size > data.len() { return None; }
+    if first_packet_size < 7 { return None; }
+    if &data[comment_start..comment_start+7] != b"\x03vorbis" { return None; }
+
+    let vc_data = &data[comment_start + 7..comment_start + first_packet_size];
+    let tags = parse_vc_to_batch_tags(vc_data);
+
+    let length = ogg::find_last_granule(data, serial)
+        .map(|g| if g > 0 && sample_rate > 0 { g as f64 / sample_rate as f64 } else { 0.0 })
+        .unwrap_or(0.0);
+
+    Some(PreSerializedFile {
+        length,
+        sample_rate,
+        channels: channels as u32,
+        bitrate: None,
+        tags,
+    })
+}
+
+/// Convert MP4TagValue to BatchTagValue (inline, no extra lookup).
+#[inline(always)]
+fn mp4_value_to_batch(value: &mp4::MP4TagValue) -> BatchTagValue {
+    match value {
+        mp4::MP4TagValue::Text(v) => {
+            if v.len() == 1 { BatchTagValue::Text(v[0].clone()) }
+            else { BatchTagValue::TextList(v.clone()) }
+        }
+        mp4::MP4TagValue::Integer(v) => {
+            if v.len() == 1 { BatchTagValue::Int(v[0] as i64) }
+            else { BatchTagValue::TextList(v.iter().map(|i| itoa::Buffer::new().format(*i).to_string()).collect()) }
+        }
+        mp4::MP4TagValue::IntPair(v) => {
+            if v.len() == 1 { BatchTagValue::IntPair(v[0].0, v[0].1) }
+            else { BatchTagValue::TextList(v.iter().map(|(a,b)| { let mut s = String::with_capacity(12); s.push('('); s.push_str(itoa::Buffer::new().format(*a)); s.push(','); s.push_str(itoa::Buffer::new().format(*b)); s.push(')'); s }).collect()) }
+        }
+        mp4::MP4TagValue::Bool(v) => BatchTagValue::Bool(*v),
+        mp4::MP4TagValue::Cover(covers) => {
+            BatchTagValue::CoverList(covers.iter().map(|c| (c.data.clone(), c.format as u8)).collect())
+        }
+        mp4::MP4TagValue::FreeForm(forms) => {
+            BatchTagValue::FreeFormList(forms.iter().map(|f| f.data.clone()).collect())
+        }
+        mp4::MP4TagValue::Data(d) => BatchTagValue::Bytes(d.clone()),
+    }
+}
+
+/// Parse MP3 data into batch result.
+#[inline(always)]
+fn parse_mp3_batch(data: &[u8], path: &str) -> Option<PreSerializedFile> {
+    let mut f = mp3::MP3File::parse(data, path).ok()?;
+    let mut tags = Vec::with_capacity(f.tags.frames.len());
+    for (hash_key, frames) in f.tags.frames.iter_mut() {
+        if let Some(lf) = frames.first_mut() {
+            if let Ok(frame) = lf.decode() {
+                tags.push((hash_key.0.clone(), frame_to_batch_value(frame)));
+            }
+        }
+    }
+    Some(PreSerializedFile {
+        length: f.info.length,
+        sample_rate: f.info.sample_rate,
+        channels: f.info.channels,
+        bitrate: Some(f.info.bitrate),
+        tags,
+    })
+}
+
+/// Parse MP4 data into batch result.
+#[inline(always)]
+fn parse_mp4_batch(data: &[u8], path: &str) -> Option<PreSerializedFile> {
+    let f = mp4::MP4File::parse(data, path).ok()?;
+    let mut tags = Vec::with_capacity(f.tags.items.len());
+    for (key, value) in &f.tags.items {
+        tags.push((key.clone(), mp4_value_to_batch(value)));
+    }
+    Some(PreSerializedFile {
+        length: f.info.length,
+        sample_rate: f.info.sample_rate,
+        channels: f.info.channels as u32,
+        bitrate: None,
+        tags,
+    })
+}
+
 /// Parse + fully decode a single file from data (runs in parallel phase).
+/// Uses extension-based fast dispatch to skip unnecessary scoring.
+#[inline(always)]
 fn parse_and_serialize(data: &[u8], path: &str) -> Option<PreSerializedFile> {
+    let ext = path.rsplit('.').next().unwrap_or("");
+    if ext.eq_ignore_ascii_case("flac") {
+        return parse_flac_batch(data);
+    }
+    if ext.eq_ignore_ascii_case("ogg") {
+        return parse_ogg_batch(data);
+    }
+    if ext.eq_ignore_ascii_case("mp3") {
+        return parse_mp3_batch(data, path);
+    }
+    if ext.eq_ignore_ascii_case("m4a") || ext.eq_ignore_ascii_case("m4b")
+        || ext.eq_ignore_ascii_case("mp4") || ext.eq_ignore_ascii_case("m4v") {
+        return parse_mp4_batch(data, path);
+    }
+
     let mp3_score = mp3::MP3File::score(path, data);
     let flac_score = flac::FLACFile::score(path, data);
     let ogg_score = ogg::OggVorbisFile::score(path, data);
@@ -1017,100 +1199,18 @@ fn parse_and_serialize(data: &[u8], path: &str) -> Option<PreSerializedFile> {
     }
 
     if max_score == flac_score {
-        let f = flac::FLACFile::parse(data, path).ok()?;
-        let mut tags = Vec::new();
-        if let Some(ref vc) = f.tags {
-            for key in vc.keys() {
-                let values = vc.get(&key);
-                if !values.is_empty() {
-                    let list: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-                    tags.push((key, BatchTagValue::TextList(list)));
-                }
-            }
-        }
-        Some(PreSerializedFile {
-            length: f.info.length,
-            sample_rate: f.info.sample_rate,
-            channels: f.info.channels as u32,
-            bitrate: None,
-            tags,
-        })
+        parse_flac_batch(data)
     } else if max_score == ogg_score {
-        let f = ogg::OggVorbisFile::parse(data, path).ok()?;
-        let mut tags = Vec::new();
-        for key in f.tags.keys() {
-            let values = f.tags.get(&key);
-            if !values.is_empty() {
-                let list: Vec<String> = values.iter().map(|s| s.to_string()).collect();
-                tags.push((key, BatchTagValue::TextList(list)));
-            }
-        }
-        Some(PreSerializedFile {
-            length: f.info.length,
-            sample_rate: f.info.sample_rate,
-            channels: f.info.channels as u32,
-            bitrate: None,
-            tags,
-        })
+        parse_ogg_batch(data)
     } else if max_score == mp4_score {
-        let f = mp4::MP4File::parse(data, path).ok()?;
-        let mut tags = Vec::new();
-        for key in f.tags.keys() {
-            if let Some(value) = f.tags.get(&key) {
-                let bv = match value {
-                    mp4::MP4TagValue::Text(v) => {
-                        if v.len() == 1 { BatchTagValue::Text(v[0].clone()) }
-                        else { BatchTagValue::TextList(v.clone()) }
-                    }
-                    mp4::MP4TagValue::Integer(v) => {
-                        if v.len() == 1 { BatchTagValue::Int(v[0] as i64) }
-                        else { BatchTagValue::TextList(v.iter().map(|i| i.to_string()).collect()) }
-                    }
-                    mp4::MP4TagValue::IntPair(v) => {
-                        if v.len() == 1 { BatchTagValue::IntPair(v[0].0, v[0].1) }
-                        else { BatchTagValue::TextList(v.iter().map(|(a,b)| format!("({},{})", a, b)).collect()) }
-                    }
-                    mp4::MP4TagValue::Bool(v) => BatchTagValue::Bool(*v),
-                    mp4::MP4TagValue::Cover(covers) => {
-                        BatchTagValue::CoverList(covers.iter().map(|c| (c.data.clone(), c.format as u8)).collect())
-                    }
-                    mp4::MP4TagValue::FreeForm(forms) => {
-                        BatchTagValue::FreeFormList(forms.iter().map(|f| f.data.clone()).collect())
-                    }
-                    mp4::MP4TagValue::Data(d) => BatchTagValue::Bytes(d.clone()),
-                };
-                tags.push((key, bv));
-            }
-        }
-        Some(PreSerializedFile {
-            length: f.info.length,
-            sample_rate: f.info.sample_rate,
-            channels: f.info.channels as u32,
-            bitrate: None,
-            tags,
-        })
+        parse_mp4_batch(data, path)
     } else {
-        let mut f = mp3::MP3File::parse(data, path).ok()?;
-        let mut tags = Vec::new();
-        for (hash_key, frames) in f.tags.frames.iter_mut() {
-            if let Some(lf) = frames.first_mut() {
-                if let Ok(frame) = lf.decode() {
-                    tags.push((hash_key.0.clone(), frame_to_batch_value(frame)));
-                }
-            }
-        }
-        Some(PreSerializedFile {
-            length: f.info.length,
-            sample_rate: f.info.sample_rate,
-            channels: f.info.channels,
-            bitrate: Some(f.info.bitrate),
-            tags,
-        })
+        parse_mp3_batch(data, path)
     }
 }
 
 /// Convert pre-serialized BatchTagValue to Python object (minimal serial work).
-#[inline]
+#[inline(always)]
 fn batch_value_to_py(py: Python<'_>, bv: &BatchTagValue) -> PyResult<PyObject> {
     match bv {
         BatchTagValue::Text(s) => Ok(s.as_str().into_pyobject(py)?.into_any().unbind()),
@@ -1159,7 +1259,7 @@ fn batch_value_to_py(py: Python<'_>, bv: &BatchTagValue) -> PyResult<PyObject> {
 }
 
 /// Convert pre-serialized file to Python dict (minimal serial work with interned keys).
-#[inline]
+#[inline(always)]
 fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<Py<PyAny>> {
     let inner = PyDict::new(py);
     inner.set_item(pyo3::intern!(py, "length"), pf.length)?;
@@ -1168,19 +1268,17 @@ fn preserialized_to_py_dict(py: Python<'_>, pf: &PreSerializedFile) -> PyResult<
     if let Some(br) = pf.bitrate {
         inner.set_item(pyo3::intern!(py, "bitrate"), br)?;
     }
-
-    let tags = PyDict::new(py);
+    let tags_dict = PyDict::new(py);
     for (key, value) in &pf.tags {
-        tags.set_item(key.as_str(), batch_value_to_py(py, value)?)?;
+        tags_dict.set_item(key.as_str(), batch_value_to_py(py, value)?)?;
     }
-    inner.set_item(pyo3::intern!(py, "tags"), tags)?;
-
+    inner.set_item(pyo3::intern!(py, "tags"), tags_dict)?;
     Ok(inner.into_any().unbind())
 }
 
 /// JSON-escape a string value for safe embedding in JSON.
 /// Fast path: if string has no special characters, avoid per-char scanning.
-#[inline]
+#[inline(always)]
 fn json_escape_to(s: &str, out: &mut String) {
     out.push('"');
     // Fast path: check if any escaping is needed using memchr
@@ -1206,7 +1304,7 @@ fn json_escape_to(s: &str, out: &mut String) {
 }
 
 /// Serialize a BatchTagValue to a JSON fragment.
-#[inline]
+#[inline(always)]
 fn batch_value_to_json(bv: &BatchTagValue, out: &mut String) {
     match bv {
         BatchTagValue::Text(s) => json_escape_to(s, out),
@@ -1253,21 +1351,21 @@ fn batch_value_to_json(bv: &BatchTagValue, out: &mut String) {
 }
 
 /// Write an integer to a string using itoa (faster than format!).
-#[inline]
+#[inline(always)]
 fn write_int(out: &mut String, v: impl itoa::Integer) {
     let mut buf = itoa::Buffer::new();
     out.push_str(buf.format(v));
 }
 
 /// Write a float to a string using ryu (faster than format!).
-#[inline]
+#[inline(always)]
 fn write_float(out: &mut String, v: f64) {
     let mut buf = ryu::Buffer::new();
     out.push_str(buf.format(v));
 }
 
 /// Serialize a PreSerializedFile to a JSON object string.
-#[inline]
+#[inline(always)]
 fn preserialized_to_json(pf: &PreSerializedFile, out: &mut String) {
     out.push_str("{\"length\":");
     write_float(out, pf.length);
@@ -1282,7 +1380,6 @@ fn preserialized_to_json(pf: &PreSerializedFile, out: &mut String) {
     out.push_str(",\"tags\":{");
     let mut first = true;
     for (key, value) in &pf.tags {
-        // Skip null values (binary data)
         if matches!(value, BatchTagValue::Bytes(_) | BatchTagValue::Picture { .. } |
             BatchTagValue::Popularimeter { .. } | BatchTagValue::CoverList(_) |
             BatchTagValue::FreeFormList(_)) {
@@ -1359,12 +1456,6 @@ impl PyBatchResult {
     }
 }
 
-/// Minimal parse: just detect format + parse headers, minimal allocations.
-#[inline]
-fn parse_file_minimal(data: &[u8], path: &str) -> Option<PreSerializedFile> {
-    parse_and_serialize(data, path)
-}
-
 /// Batch open: read and parse multiple files in parallel using rayon.
 /// Returns a BatchResult with lazy Python object creation.
 /// All file I/O + parsing happens in parallel (no GIL).
@@ -1373,28 +1464,77 @@ fn parse_file_minimal(data: &[u8], path: &str) -> Option<PreSerializedFile> {
 fn batch_open(py: Python<'_>, filenames: Vec<String>) -> PyResult<PyBatchResult> {
     use rayon::prelude::*;
 
-    let file_count = filenames.len();
+    let files: Vec<(String, PreSerializedFile)> = py.allow_threads(|| {
+        let n = filenames.len();
+        if n == 0 { return Vec::new(); }
 
-    // All parsing happens in parallel with GIL released
-    // Use with_min_len to reduce rayon scheduling overhead for small batches
-    let min_chunk = if file_count < 64 { 4 } else { 8 };
-    let parsed: Vec<(String, Option<PreSerializedFile>)> = py.allow_threads(|| {
-        filenames.par_iter().with_min_len(min_chunk).map(|path| {
-            let data = match std::fs::read(path) {
-                Ok(d) => d,
-                Err(_) => return (path.clone(), None),
-            };
-            let result = parse_file_minimal(&data, path);
-            (path.clone(), result)
-        }).collect()
+        // Parallel read+parse with rayon (indexed map for best scheduling).
+        let results: Vec<Option<PreSerializedFile>> = filenames
+            .par_iter()
+            .map(|path| {
+                let data = std::fs::read(path).ok()?;
+                parse_and_serialize(&data, path)
+            })
+            .collect();
+
+        filenames.into_iter()
+            .zip(results)
+            .filter_map(|(path, pf)| pf.map(|pf| (path, pf)))
+            .collect()
     });
 
-    let files: Vec<(String, PreSerializedFile)> = parsed
-        .into_iter()
-        .filter_map(|(path, pf)| pf.map(|p| (path, p)))
-        .collect();
-
     Ok(PyBatchResult { files })
+}
+
+/// Diagnostic version: measures I/O vs parse vs parallel overhead.
+#[pyfunction]
+fn batch_diag(py: Python<'_>, filenames: Vec<String>) -> PyResult<String> {
+    use rayon::prelude::*;
+    use std::time::Instant;
+
+    let result = py.allow_threads(|| {
+        let n = filenames.len();
+
+        // Phase 1: Sequential file reads
+        let t1 = Instant::now();
+        let file_data: Vec<(String, Vec<u8>)> = filenames.iter()
+            .filter_map(|p| std::fs::read(p).ok().map(|d| (p.clone(), d)))
+            .collect();
+        let read_seq_us = t1.elapsed().as_micros();
+
+        // Phase 2: Sequential parse (no I/O)
+        let t2 = Instant::now();
+        let _: Vec<_> = file_data.iter()
+            .filter_map(|(p, d)| parse_and_serialize(d, p).map(|pf| (p.clone(), pf)))
+            .collect();
+        let parse_seq_us = t2.elapsed().as_micros();
+
+        // Phase 3: Parallel parse (no I/O)
+        let t3 = Instant::now();
+        let _: Vec<_> = file_data.par_iter()
+            .filter_map(|(p, d)| parse_and_serialize(d, p).map(|pf| (p.clone(), pf)))
+            .collect();
+        let parse_par_us = t3.elapsed().as_micros();
+
+        // Phase 4: Parallel read+parse (current approach)
+        let t4 = Instant::now();
+        let _: Vec<_> = filenames.par_iter().filter_map(|path| {
+            let data = std::fs::read(path).ok()?;
+            let pf = parse_and_serialize(&data, path)?;
+            Some((path.clone(), pf))
+        }).collect();
+        let full_par_us = t4.elapsed().as_micros();
+
+        format!(
+            "n={} | seq_read={}µs seq_parse={}µs par_parse={}µs full_par={}µs | \
+             parse_par_speedup={:.1}x io_fraction={:.0}%",
+            n, read_seq_us, parse_seq_us, parse_par_us, full_par_us,
+            parse_seq_us as f64 / parse_par_us.max(1) as f64,
+            read_seq_us as f64 / (read_seq_us + parse_seq_us).max(1) as f64 * 100.0,
+        )
+    });
+
+    Ok(result)
 }
 
 /// Auto-detect file format and open.
@@ -1421,16 +1561,16 @@ fn file_open(py: Python<'_>, filename: &str, easy: bool) -> PyResult<PyObject> {
     }
 
     if max_score == flac_score {
-        let f = PyFLAC::from_data(py, &data, filename)?;
+        let f = PyFLAC::from_data(&data, filename)?;
         Ok(f.into_pyobject(py)?.into_any().unbind())
     } else if max_score == ogg_score {
-        let f = PyOggVorbis::from_data(py, &data, filename)?;
+        let f = PyOggVorbis::from_data(&data, filename)?;
         Ok(f.into_pyobject(py)?.into_any().unbind())
     } else if max_score == mp4_score {
-        let f = PyMP4::from_data(py, &data, filename)?;
+        let f = PyMP4::from_data(&data, filename)?;
         Ok(f.into_pyobject(py)?.into_any().unbind())
     } else {
-        let f = PyMP3::from_data(py, &data, filename)?;
+        let f = PyMP3::from_data(&data, filename)?;
         Ok(f.into_pyobject(py)?.into_any().unbind())
     }
 }
@@ -1454,6 +1594,7 @@ fn mutagen_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     m.add_function(wrap_pyfunction!(file_open, m)?)?;
     m.add_function(wrap_pyfunction!(batch_open, m)?)?;
+    m.add_function(wrap_pyfunction!(batch_diag, m)?)?;
 
     m.add("MutagenError", m.py().get_type::<common::error::MutagenPyError>())?;
     m.add("ID3Error", m.py().get_type::<common::error::ID3Error>())?;

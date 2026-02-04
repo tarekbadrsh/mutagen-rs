@@ -175,31 +175,60 @@ pub struct OggVorbisFile {
     pub path: String,
 }
 
+/// Lightweight page header — no packet reassembly, zero allocations.
+#[inline(always)]
+fn ogg_page_header(data: &[u8], offset: usize) -> Option<(u32, usize)> {
+    if offset + 27 > data.len() { return None; }
+    let d = &data[offset..];
+    if &d[0..4] != b"OggS" { return None; }
+    let serial = u32::from_le_bytes([d[14], d[15], d[16], d[17]]);
+    let num_seg = d[26] as usize;
+    let header_size = 27 + num_seg;
+    if offset + header_size > data.len() { return None; }
+    let data_size: usize = d[27..27 + num_seg].iter().map(|&s| s as usize).sum();
+    Some((serial, header_size + data_size))
+}
+
+/// Extract the first packet from an OGG page without allocating.
+/// Returns a slice into the original data.
+#[inline(always)]
+fn ogg_first_packet(data: &[u8], offset: usize) -> Option<&[u8]> {
+    if offset + 27 > data.len() { return None; }
+    let d = &data[offset..];
+    let num_seg = d[26] as usize;
+    let header_size = 27 + num_seg;
+    if offset + header_size > data.len() { return None; }
+    let mut packet_size = 0usize;
+    for &seg in &d[27..header_size] {
+        packet_size += seg as usize;
+        if seg < 255 { break; }
+    }
+    let pkt_start = offset + header_size;
+    if pkt_start + packet_size > data.len() { return None; }
+    Some(&data[pkt_start..pkt_start + packet_size])
+}
+
 impl OggVorbisFile {
     pub fn open(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
         Self::parse(&data, path)
     }
 
+    /// Parse using lightweight inline page headers — no OggPage allocation,
+    /// no Vec<u8> segment tables, no Vec<Vec<u8>> packet reassembly.
+    #[inline(always)]
     pub fn parse(data: &[u8], path: &str) -> Result<Self> {
-        // Parse first page (should contain identification header)
-        let first_page = OggPage::parse(data, 0)?;
+        // Page 1: identification header (zero-alloc)
+        let (serial, page1_size) = ogg_page_header(data, 0)
+            .ok_or_else(|| MutagenError::Ogg("Cannot parse first OGG page".into()))?;
 
-        if first_page.packets.is_empty() {
-            return Err(MutagenError::Ogg("No packets in first page".into()));
-        }
+        let id_packet = ogg_first_packet(data, 0)
+            .ok_or_else(|| MutagenError::Ogg("No packets in first page".into()))?;
 
-        let id_packet = &first_page.packets[0];
-
-        // Verify Vorbis identification header
         if id_packet.len() < 30 || &id_packet[0..7] != b"\x01vorbis" {
             return Err(MutagenError::Ogg("Not a Vorbis stream".into()));
         }
 
-        // Parse identification header
-        let _vorbis_version = u32::from_le_bytes([
-            id_packet[7], id_packet[8], id_packet[9], id_packet[10],
-        ]);
         let channels = id_packet[11];
         let sample_rate = u32::from_le_bytes([
             id_packet[12], id_packet[13], id_packet[14], id_packet[15],
@@ -214,23 +243,18 @@ impl OggVorbisFile {
             id_packet[24], id_packet[25], id_packet[26], id_packet[27],
         ]);
 
-        // Parse second page (comment header)
-        let second_page = OggPage::parse(data, first_page.size)?;
-        let mut comment_data = if !second_page.packets.is_empty() {
-            second_page.packets[0].clone()
-        } else {
-            return Err(MutagenError::Ogg("No comment packet".into()));
-        };
+        // Page 2: comment header (zero-alloc slice into data)
+        let comment_packet = ogg_first_packet(data, page1_size)
+            .ok_or_else(|| MutagenError::Ogg("No comment packet".into()))?;
 
-        // The comment packet starts with \x03vorbis
-        if comment_data.len() < 7 || &comment_data[0..7] != b"\x03vorbis" {
+        if comment_packet.len() < 7 || &comment_packet[0..7] != b"\x03vorbis" {
             return Err(MutagenError::Ogg("Invalid comment header".into()));
         }
 
-        let tags = VorbisComment::parse(&comment_data[7..], true)?;
+        let tags = VorbisComment::parse(&comment_packet[7..], true)?;
 
-        // Calculate duration from last page (zero-alloc: only reads header)
-        let length = if let Some(granule) = find_last_granule(data, first_page.serial_number) {
+        // Duration from last page (zero-alloc: only reads header)
+        let length = if let Some(granule) = find_last_granule(data, serial) {
             if granule > 0 && sample_rate > 0 {
                 granule as f64 / sample_rate as f64
             } else {
@@ -240,7 +264,6 @@ impl OggVorbisFile {
             0.0
         };
 
-        // Calculate actual bitrate from file size if nominal is 0
         let actual_bitrate = if bitrate > 0 {
             bitrate
         } else if length > 0.0 {
@@ -320,8 +343,8 @@ impl OggVorbisFile {
 
     pub fn score(path: &str, data: &[u8]) -> u32 {
         let mut score = 0u32;
-        let ext = path.rsplit('.').next().unwrap_or("").to_lowercase();
-        if ext == "ogg" {
+        let ext = path.rsplit('.').next().unwrap_or("");
+        if ext.eq_ignore_ascii_case("ogg") {
             score += 2;
         }
         if data.len() >= 4 && &data[0..4] == b"OggS" {
