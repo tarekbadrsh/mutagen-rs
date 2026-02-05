@@ -5,10 +5,14 @@ edition = "2021"
 
 [lib]
 name = "mutagen_rs"
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "lib"]
+
+[features]
+default = ["python"]
+python = ["dep:pyo3"]
 
 [dependencies]
-pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3 = { version = "0.27", features = ["extension-module"], optional = true }
 memmap2 = "0.9"
 thiserror = "2.0"
 encoding_rs = "0.8"
@@ -23,6 +27,14 @@ libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 io-uring = "0.7"
+
+[dev-dependencies]
+criterion = { version = "0.5", features = ["html_reports"] }
+lofty = { path = "lofty-rs/lofty" }
+
+[[bench]]
+name = "parse_comparison"
+harness = false
 
 [profile.release]
 lto = "fat"

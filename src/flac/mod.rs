@@ -229,12 +229,20 @@ impl FLACPicture {
     }
 }
 
+/// A lazily-parsed picture reference (stores offset instead of copying data).
+#[derive(Debug, Clone)]
+pub struct LazyPicture {
+    pub block_offset: usize,
+    pub block_size: usize,
+}
+
 /// Complete FLAC file handler.
 #[derive(Debug)]
 pub struct FLACFile {
     pub info: StreamInfo,
     pub tags: Option<VorbisComment>,
     pub pictures: Vec<FLACPicture>,
+    pub lazy_pictures: Vec<LazyPicture>,
     pub metadata_blocks: Vec<MetadataBlock>,
     pub path: String,
     pub metadata_length: usize, // total bytes of fLaC + metadata blocks
@@ -278,7 +286,7 @@ impl FLACFile {
         let mut blocks = Vec::new();
         let mut stream_info = None;
         let mut tags = None;
-        let mut pictures = Vec::new();
+        let mut lazy_pictures = Vec::new();
 
         loop {
             if pos + 4 > data.len() {
@@ -295,37 +303,53 @@ impl FLACFile {
                 break;
             }
 
-            let block_slice = &data[pos..pos + block_size];
-            pos += block_size;
-
             match block_type {
                 BlockType::StreamInfo => {
-                    stream_info = Some(StreamInfo::parse(block_slice)?);
+                    stream_info = Some(StreamInfo::parse(&data[pos..pos + block_size])?);
+                    // Store raw data for save()
+                    blocks.push(MetadataBlock {
+                        block_type,
+                        is_last,
+                        data: data[pos..pos + block_size].to_vec(),
+                    });
                 }
                 BlockType::VorbisComment => {
-                    tags = Some(VorbisComment::parse(block_slice, false)?);
+                    tags = Some(VorbisComment::parse(&data[pos..pos + block_size], false)?);
+                    blocks.push(MetadataBlock {
+                        block_type,
+                        is_last,
+                        data: Vec::new(), // Regenerated from parsed struct on save
+                    });
                 }
                 BlockType::Picture => {
-                    if let Ok(pic) = FLACPicture::parse(block_slice) {
-                        pictures.push(pic);
-                    }
+                    // Lazy: just record offset, don't copy picture data
+                    lazy_pictures.push(LazyPicture {
+                        block_offset: pos,
+                        block_size,
+                    });
+                    blocks.push(MetadataBlock {
+                        block_type,
+                        is_last,
+                        data: Vec::new(),
+                    });
                 }
-                _ => {}
+                BlockType::Padding => {
+                    blocks.push(MetadataBlock {
+                        block_type,
+                        is_last,
+                        data: Vec::new(),
+                    });
+                }
+                _ => {
+                    blocks.push(MetadataBlock {
+                        block_type,
+                        is_last,
+                        data: data[pos..pos + block_size].to_vec(),
+                    });
+                }
             }
 
-            // Only store raw data for blocks needed by save().
-            // Parsed blocks (VorbisComment, Picture) are regenerated from parsed structs.
-            // Padding is regenerated. Only StreamInfo and other blocks need raw data.
-            let store_data = match block_type {
-                BlockType::VorbisComment | BlockType::Picture | BlockType::Padding => Vec::new(),
-                _ => block_slice.to_vec(),
-            };
-
-            blocks.push(MetadataBlock {
-                block_type,
-                is_last,
-                data: store_data,
-            });
+            pos += block_size;
 
             if is_last {
                 break;
@@ -337,7 +361,8 @@ impl FLACFile {
         Ok(FLACFile {
             info,
             tags,
-            pictures,
+            pictures: Vec::new(), // Empty - use lazy_pictures instead
+            lazy_pictures,
             metadata_blocks: blocks,
             path: path.to_string(),
             metadata_length: pos - flac_offset,
@@ -386,9 +411,15 @@ impl FLACFile {
             blocks_to_write.push((BlockType::VorbisComment, vc.render(false)));
         }
 
-        // Pictures
+        // Pictures (from lazy or parsed)
         for pic in &self.pictures {
             blocks_to_write.push((BlockType::Picture, pic.render()));
+        }
+        // Re-read lazy pictures from original data
+        for lp in &self.lazy_pictures {
+            if lp.block_offset + lp.block_size <= existing.len() {
+                blocks_to_write.push((BlockType::Picture, existing[lp.block_offset..lp.block_offset + lp.block_size].to_vec()));
+            }
         }
 
         // Other blocks (skip StreamInfo, VorbisComment, Picture, Padding)

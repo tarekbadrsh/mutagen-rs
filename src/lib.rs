@@ -6,12 +6,16 @@ pub mod ogg;
 pub mod mp4;
 pub mod vorbis;
 
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+
+#[cfg(feature = "python")]
+mod python_bindings {
+use super::*;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyList, PyBytes, PyTuple};
 use pyo3::exceptions::{PyValueError, PyKeyError, PyIOError};
-
-#[global_allocator]
-static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 // ---- Python Classes ----
 
@@ -1139,7 +1143,7 @@ fn parse_mp3_batch(data: &[u8], path: &str) -> Option<PreSerializedFile> {
     for (hash_key, frames) in f.tags.frames.iter_mut() {
         if let Some(lf) = frames.first_mut() {
             if let Ok(frame) = lf.decode() {
-                tags.push((hash_key.0.clone(), frame_to_batch_value(frame)));
+                tags.push((hash_key.as_str().to_string(), frame_to_batch_value(frame)));
             }
         }
     }
@@ -1610,3 +1614,4 @@ fn mutagen_rs(m: &Bound<'_, PyModule>) -> PyResult<()> {
 
     Ok(())
 }
+} // mod python_bindings

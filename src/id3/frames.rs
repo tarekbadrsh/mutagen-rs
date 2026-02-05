@@ -4,12 +4,65 @@ use crate::id3::specs::{self, Encoding, PictureType};
 /// Represents the hash key for a frame, used for dictionary-like access.
 /// Most frames use their 4-char ID, but some include extra info
 /// (e.g., TXXX:description, COMM:description:language).
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct HashKey(pub String);
+/// Uses inline storage for short keys (<=16 bytes) to avoid heap allocation.
+#[derive(Debug, Clone)]
+pub enum HashKey {
+    /// Short key stored inline (most frame IDs: "TIT2", "TPE1", etc.)
+    Short([u8; 16], u8),
+    /// Long key on the heap (e.g., "TXXX:some long description")
+    Long(String),
+}
 
 impl HashKey {
+    #[inline]
     pub fn new(s: &str) -> Self {
-        HashKey(s.to_string())
+        let bytes = s.as_bytes();
+        if bytes.len() <= 16 {
+            let mut buf = [0u8; 16];
+            buf[..bytes.len()].copy_from_slice(bytes);
+            HashKey::Short(buf, bytes.len() as u8)
+        } else {
+            HashKey::Long(s.to_string())
+        }
+    }
+
+    #[inline]
+    pub fn as_str(&self) -> &str {
+        match self {
+            HashKey::Short(buf, len) => {
+                // SAFETY: we only store valid UTF-8 in the buffer
+                unsafe { std::str::from_utf8_unchecked(&buf[..*len as usize]) }
+            }
+            HashKey::Long(s) => s.as_str(),
+        }
+    }
+
+    /// Create from a format string (used for composite keys like "TXXX:desc")
+    #[inline]
+    pub fn from_string(s: String) -> Self {
+        if s.len() <= 16 {
+            let mut buf = [0u8; 16];
+            buf[..s.len()].copy_from_slice(s.as_bytes());
+            HashKey::Short(buf, s.len() as u8)
+        } else {
+            HashKey::Long(s)
+        }
+    }
+}
+
+impl PartialEq for HashKey {
+    #[inline]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_str() == other.as_str()
+    }
+}
+
+impl Eq for HashKey {}
+
+impl std::hash::Hash for HashKey {
+    #[inline]
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state)
     }
 }
 
@@ -49,13 +102,13 @@ impl Frame {
     pub fn hash_key(&self) -> HashKey {
         match self {
             Frame::Text(f) => HashKey::new(&f.id),
-            Frame::UserText(f) => HashKey(format!("TXXX:{}", f.desc)),
+            Frame::UserText(f) => HashKey::from_string(format!("TXXX:{}", f.desc)),
             Frame::Url(f) => HashKey::new(&f.id),
-            Frame::UserUrl(f) => HashKey(format!("WXXX:{}", f.desc)),
-            Frame::Comment(f) => HashKey(format!("COMM:{}:{}", f.desc, f.lang)),
-            Frame::Lyrics(f) => HashKey(format!("USLT:{}:{}", f.desc, f.lang)),
-            Frame::Picture(f) => HashKey(format!("APIC:{}", f.desc)),
-            Frame::Popularimeter(f) => HashKey(format!("POPM:{}", f.email)),
+            Frame::UserUrl(f) => HashKey::from_string(format!("WXXX:{}", f.desc)),
+            Frame::Comment(f) => HashKey::from_string(format!("COMM:{}:{}", f.desc, f.lang)),
+            Frame::Lyrics(f) => HashKey::from_string(format!("USLT:{}:{}", f.desc, f.lang)),
+            Frame::Picture(f) => HashKey::from_string(format!("APIC:{}", f.desc)),
+            Frame::Popularimeter(f) => HashKey::from_string(format!("POPM:{}", f.email)),
             Frame::Binary(f) => HashKey::new(&f.id),
             Frame::PairedText(f) => HashKey::new(&f.id),
         }

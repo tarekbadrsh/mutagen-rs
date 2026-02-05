@@ -1,0 +1,1 @@
+./lofty/SUPPORTED_FORMATS.md

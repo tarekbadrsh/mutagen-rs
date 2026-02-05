@@ -18,7 +18,7 @@ impl VorbisComment {
 
     /// Parse a Vorbis comment block from bytes.
     /// `framing` controls whether to expect a framing bit at the end (true for OGG, false for FLAC).
-    pub fn parse(data: &[u8], framing: bool) -> Result<Self> {
+    pub fn parse(data: &[u8], _framing: bool) -> Result<Self> {
         if data.len() < 4 {
             return Err(MutagenError::InvalidData("Vorbis comment too short".into()));
         }
@@ -51,7 +51,7 @@ impl VorbisComment {
         ]) as usize;
         pos += 4;
 
-        let mut comments = Vec::with_capacity(count);
+        let mut comments = Vec::with_capacity(count.min(64));
 
         for _ in 0..count {
             if pos + 4 > data.len() {
@@ -70,24 +70,38 @@ impl VorbisComment {
             let raw = &data[pos..pos + comment_len];
             pos += comment_len;
 
-            // Try zero-copy UTF-8, fall back to lossy
-            let comment_str = match std::str::from_utf8(raw) {
-                Ok(s) => std::borrow::Cow::Borrowed(s),
-                Err(_) => String::from_utf8_lossy(raw),
+            // Use SIMD-accelerated memchr to find '=' on raw bytes (avoid UTF-8 decode overhead)
+            let eq_pos = match memchr::memchr(b'=', raw) {
+                Some(p) => p,
+                None => continue,
             };
 
-            // Split on first '='
-            if let Some(eq_pos) = comment_str.find('=') {
-                // Uppercase key - most keys are already ASCII uppercase
-                let key_part = &comment_str[..eq_pos];
-                let key = if key_part.bytes().all(|b| b.is_ascii_uppercase() || !b.is_ascii_lowercase()) {
-                    key_part.to_string()
-                } else {
-                    key_part.to_uppercase()
-                };
-                let value = comment_str[eq_pos + 1..].to_string();
-                comments.push((key, value));
-            }
+            let key_bytes = &raw[..eq_pos];
+            let value_bytes = &raw[eq_pos + 1..];
+
+            // Key: fast ASCII uppercase
+            let key = if key_bytes.iter().all(|&b| !b.is_ascii_lowercase()) {
+                // Already uppercase (common case) - zero-copy if valid UTF-8
+                match std::str::from_utf8(key_bytes) {
+                    Ok(s) => s.to_string(),
+                    Err(_) => continue,
+                }
+            } else {
+                // Fast ASCII uppercase without full Unicode overhead
+                let mut k = String::with_capacity(key_bytes.len());
+                for &b in key_bytes {
+                    k.push(if b.is_ascii_lowercase() { (b - 32) as char } else { b as char });
+                }
+                k
+            };
+
+            // Value: zero-copy if valid UTF-8
+            let value = match std::str::from_utf8(value_bytes) {
+                Ok(s) => s.to_string(),
+                Err(_) => String::from_utf8_lossy(value_bytes).into_owned(),
+            };
+
+            comments.push((key, value));
         }
 
         Ok(VorbisComment { vendor, comments })

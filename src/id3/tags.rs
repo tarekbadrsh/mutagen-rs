@@ -98,8 +98,19 @@ impl ID3Tags {
 
     /// Add a raw (lazy) frame.
     pub fn add_raw(&mut self, id: String, data: Vec<u8>) {
-        let lazy = LazyFrame::Raw { id: id.clone(), data };
-        let key = lazy.hash_key();
+        // Fast path: for most frames, hash key is just the frame ID.
+        // Only TXXX, WXXX, COMM, USLT, APIC, POPM need decode for proper hash key.
+        let needs_decode = matches!(id.as_str(), "TXXX" | "WXXX" | "COMM" | "USLT" | "APIC" | "POPM");
+        let key = if needs_decode {
+            // Must decode to get proper hash key
+            match frames::parse_frame(&id, &data) {
+                Ok(f) => f.hash_key(),
+                Err(_) => HashKey::new(&id),
+            }
+        } else {
+            HashKey::new(&id)
+        };
+        let lazy = LazyFrame::Raw { id, data };
         self.frames.entry(key).or_insert_with(Vec::new).push(lazy);
     }
 
@@ -163,7 +174,7 @@ impl ID3Tags {
 
     /// Get all keys.
     pub fn keys(&self) -> Vec<String> {
-        self.frames.keys().map(|k| k.0.clone()).collect()
+        self.frames.keys().map(|k| k.as_str().to_string()).collect()
     }
 
     /// Get all decoded frames as a flat list.
@@ -248,7 +259,6 @@ impl ID3Tags {
                 break;
             }
 
-            let id = std::str::from_utf8(id_bytes).unwrap_or("XXX").to_string();
             let size = ((data[offset + 3] as usize) << 16)
                 | ((data[offset + 4] as usize) << 8)
                 | (data[offset + 5] as usize);
@@ -262,7 +272,8 @@ impl ID3Tags {
             let frame_data = &data[offset..offset + size];
             offset += size;
 
-            if id == "PIC" {
+            // Check for PIC frame directly on bytes (avoid String allocation)
+            if id_bytes == b"PIC" {
                 match parse_v22_picture_frame(frame_data) {
                     Ok(frame) => self.add(frame),
                     Err(_) => {}
@@ -270,10 +281,12 @@ impl ID3Tags {
                 continue;
             }
 
-            let v24_id = match convert_v22_frame_id(&id) {
+            let id_str = std::str::from_utf8(id_bytes).unwrap_or("XXX");
+
+            let v24_id = match convert_v22_frame_id(id_str) {
                 Some(new_id) => new_id.to_string(),
                 None => {
-                    self.unknown_frames.push((id, frame_data.to_vec()));
+                    self.unknown_frames.push((id_str.to_string(), frame_data.to_vec()));
                     continue;
                 }
             };
@@ -306,10 +319,6 @@ impl ID3Tags {
                 break;
             }
 
-            let id = std::str::from_utf8(id_bytes)
-                .unwrap_or("XXXX")
-                .to_string();
-
             let size = BitPaddedInt::decode(&data[offset + 4..offset + 8], bpi) as usize;
             let flags = u16::from_be_bytes([data[offset + 8], data[offset + 9]]);
 
@@ -318,9 +327,6 @@ impl ID3Tags {
             if size == 0 || offset + size > data.len() {
                 break;
             }
-
-            let mut frame_data = data[offset..offset + size].to_vec();
-            offset += size;
 
             // Handle frame-level flags
             let (compressed, encrypted, unsynchronised, has_data_length) = if version == 4 {
@@ -338,6 +344,20 @@ impl ID3Tags {
                     flags & 0x0080 != 0,
                 )
             };
+
+            // Defer String allocation until we know we need it
+            let id_str = std::str::from_utf8(id_bytes).unwrap_or("XXXX");
+
+            // Fast path: no flags that require data mutation (common case)
+            if !encrypted && !compressed && !unsynchronised && !has_data_length {
+                self.add_raw(id_str.to_string(), data[offset..offset + size].to_vec());
+                offset += size;
+                continue;
+            }
+
+            let id = id_str.to_string();
+            let mut frame_data = data[offset..offset + size].to_vec();
+            offset += size;
 
             if encrypted {
                 self.unknown_frames.push((id, frame_data));

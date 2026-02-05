@@ -35,7 +35,13 @@ impl Encoding {
 pub fn decode_text(data: &[u8], encoding: Encoding) -> Result<String> {
     match encoding {
         Encoding::Latin1 => {
-            Ok(data.iter().map(|&b| b as char).collect())
+            // Fast path: if all bytes are ASCII, avoid per-char conversion
+            if data.iter().all(|&b| b < 128) {
+                // SAFETY: all bytes are valid ASCII, which is valid UTF-8
+                Ok(unsafe { String::from_utf8_unchecked(data.to_vec()) })
+            } else {
+                Ok(data.iter().map(|&b| b as char).collect())
+            }
         }
         Encoding::Utf16 => {
             if data.len() < 2 {

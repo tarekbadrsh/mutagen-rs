@@ -137,12 +137,15 @@ impl MP3File {
                 Ok(h) => {
                     let tag_size = h.size as usize;
                     if 10 + tag_size <= data.len() {
-                        let mut tag_data = data[10..10 + tag_size].to_vec();
                         let mut tags = ID3Tags::new();
                         if h.flags.unsynchronisation && h.version.0 < 4 {
-                            tag_data = id3::unsynch::decode(&tag_data)?;
+                            // Only copy when unsynchronization requires mutation
+                            let tag_data = id3::unsynch::decode(&data[10..10 + tag_size])?;
+                            tags.read_frames(&tag_data, &h)?;
+                        } else {
+                            // Zero-copy: pass slice directly
+                            tags.read_frames(&data[10..10 + tag_size], &h)?;
                         }
-                        tags.read_frames(&tag_data, &h)?;
                         let audio_start = h.full_size() as usize;
                         (tags, Some(h), audio_start)
                     } else {
