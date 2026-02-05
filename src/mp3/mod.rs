@@ -124,38 +124,32 @@ impl MP3File {
     /// Open and parse an MP3 file using cached file reads.
     pub fn open(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
-        Self::parse(&data, path)
+        let mut f = Self::parse(&data, path)?;
+        f.ensure_tags_parsed(&data);
+        Ok(f)
     }
 
-    /// Parse an MP3 file entirely from an in-memory buffer.
+    /// Parse an MP3 file: validates format + parses MPEG info.
+    /// ID3 frame parsing is deferred to ensure_tags_parsed().
     pub fn parse(data: &[u8], path: &str) -> Result<Self> {
         let file_size = data.len() as u64;
 
-        // Parse ID3v2 header and tags
-        let (tags, id3_header, audio_start) = if data.len() >= 10 {
+        // Parse ID3v2 header (but NOT frames)
+        let (id3_header, audio_start) = if data.len() >= 10 {
             match ID3Header::parse(&data[0..10], 0) {
                 Ok(h) => {
                     let tag_size = h.size as usize;
                     if 10 + tag_size <= data.len() {
-                        let mut tags = ID3Tags::new();
-                        if h.flags.unsynchronisation && h.version.0 < 4 {
-                            // Only copy when unsynchronization requires mutation
-                            let tag_data = id3::unsynch::decode(&data[10..10 + tag_size])?;
-                            tags.read_frames(&tag_data, &h)?;
-                        } else {
-                            // Zero-copy: pass slice directly
-                            tags.read_frames(&data[10..10 + tag_size], &h)?;
-                        }
                         let audio_start = h.full_size() as usize;
-                        (tags, Some(h), audio_start)
+                        (Some(h), audio_start)
                     } else {
-                        (ID3Tags::new(), None, 0)
+                        (None, 0)
                     }
                 }
-                Err(_) => (ID3Tags::new(), None, 0),
+                Err(_) => (None, 0),
             }
         } else {
-            (ID3Tags::new(), None, 0)
+            (None, 0)
         };
 
         // Parse MPEG audio info from audio data
@@ -168,28 +162,46 @@ impl MP3File {
 
         let info = MPEGInfo::parse(audio_data, 0, file_size.saturating_sub(audio_start as u64))?;
 
+        Ok(MP3File {
+            tags: ID3Tags::new(),
+            info,
+            path: path.to_string(),
+            id3_header,
+        })
+    }
+
+    /// Parse ID3 frames from the original file data.
+    /// Call this after parse() when you need tag access.
+    pub fn ensure_tags_parsed(&mut self, data: &[u8]) {
+        if let Some(ref h) = self.id3_header {
+            let tag_size = h.size as usize;
+            if 10 + tag_size <= data.len() {
+                let mut tags = ID3Tags::new();
+                if h.flags.unsynchronisation && h.version.0 < 4 {
+                    if let Ok(tag_data) = id3::unsynch::decode(&data[10..10 + tag_size]) {
+                        let _ = tags.read_frames(&tag_data, h);
+                    }
+                } else {
+                    let _ = tags.read_frames(&data[10..10 + tag_size], h);
+                }
+                self.tags = tags;
+            }
+        }
+
         // Check for ID3v1 at file end
-        let mut tags = tags;
         if data.len() >= 128 {
             let v1_data = &data[data.len() - 128..];
             if v1_data.len() >= 3 && &v1_data[0..3] == b"TAG" {
                 if let Ok(v1_frames) = id3::id3v1::parse_id3v1(v1_data) {
                     for frame in v1_frames {
                         let key = frame.hash_key();
-                        if !tags.frames.contains_key(&key) {
-                            tags.add(frame);
+                        if !self.tags.contains_key(&key) {
+                            self.tags.add(frame);
                         }
                     }
                 }
             }
         }
-
-        Ok(MP3File {
-            tags,
-            info,
-            path: path.to_string(),
-            id3_header,
-        })
     }
 
     pub fn save(&self) -> Result<()> {

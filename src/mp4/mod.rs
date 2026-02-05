@@ -1,6 +1,5 @@
 pub mod atom;
 
-use std::collections::HashMap;
 use crate::common::error::{MutagenError, Result};
 use crate::mp4::atom::{Atom, AtomIter, parse_atoms};
 
@@ -14,6 +13,20 @@ pub struct MP4Info {
     pub bits_per_sample: u32,
     pub codec: String,
     pub codec_description: String,
+}
+
+impl Default for MP4Info {
+    fn default() -> Self {
+        MP4Info {
+            length: 0.0,
+            channels: 2,
+            sample_rate: 44100,
+            bitrate: 0,
+            bits_per_sample: 16,
+            codec: String::new(),
+            codec_description: String::new(),
+        }
+    }
 }
 
 /// MP4 cover art format.
@@ -49,25 +62,38 @@ pub enum MP4TagValue {
     Data(Vec<u8>),
 }
 
-/// Complete MP4 tag container.
+/// Complete MP4 tag container (Vec-based for cache locality and low allocation).
 #[derive(Debug, Clone)]
 pub struct MP4Tags {
-    pub items: HashMap<String, MP4TagValue>,
+    pub items: Vec<(String, MP4TagValue)>,
 }
 
 impl MP4Tags {
+    #[inline]
     pub fn new() -> Self {
         MP4Tags {
-            items: HashMap::new(),
+            items: Vec::new(),
         }
     }
 
+    #[inline]
     pub fn keys(&self) -> Vec<String> {
-        self.items.keys().cloned().collect()
+        self.items.iter().map(|(k, _)| k.clone()).collect()
     }
 
+    #[inline]
     pub fn get(&self, key: &str) -> Option<&MP4TagValue> {
-        self.items.get(key)
+        self.items.iter().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    #[inline]
+    pub fn get_mut(&mut self, key: &str) -> Option<&mut MP4TagValue> {
+        self.items.iter_mut().find(|(k, _)| k == key).map(|(_, v)| v)
+    }
+
+    #[inline]
+    pub fn contains_key(&self, key: &str) -> bool {
+        self.items.iter().any(|(k, _)| k == key)
     }
 }
 
@@ -77,32 +103,54 @@ pub struct MP4File {
     pub info: MP4Info,
     pub tags: MP4Tags,
     pub path: String,
+    moov_offset: usize,
+    moov_size: usize,
+    file_size: usize,
+    parsed: bool,
 }
 
 impl MP4File {
     pub fn open(path: &str) -> Result<Self> {
         let data = std::fs::read(path)?;
-        Self::parse(&data, path)
+        let mut f = Self::parse(&data, path)?;
+        f.ensure_parsed_with_data(&data);
+        Ok(f)
     }
 
+    /// Parse: only find moov atom position (zero-copy, no data allocation).
     pub fn parse(data: &[u8], path: &str) -> Result<Self> {
         // Find moov atom using iterator (no Vec allocation for top-level)
         let moov = AtomIter::new(data, 0, data.len())
             .find_name(b"moov")
             .ok_or_else(|| MutagenError::MP4("No moov atom".into()))?;
 
-        let moov_start = moov.data_offset;
-        let moov_end = moov.data_offset + moov.data_size;
-
-        // Parse audio info and tags using iterators
-        let info = parse_mp4_info_iter(data, moov_start, moov_end)?;
-        let tags = parse_mp4_tags_iter(data, moov_start, moov_end)?;
-
         Ok(MP4File {
-            info,
-            tags,
+            info: MP4Info::default(),
+            tags: MP4Tags::new(),
             path: path.to_string(),
+            moov_offset: moov.data_offset,
+            moov_size: moov.data_size,
+            file_size: data.len(),
+            parsed: false,
         })
+    }
+
+    /// Parse tags and info directly from the original file data (no copy).
+    pub fn ensure_parsed_with_data(&mut self, data: &[u8]) {
+        if self.parsed {
+            return;
+        }
+        self.parsed = true;
+        let moov_end = self.moov_offset + self.moov_size;
+        if let Ok(mut info) = parse_mp4_info_iter(data, self.moov_offset, moov_end) {
+            if info.length > 0.0 {
+                info.bitrate = (self.file_size as f64 * 8.0 / info.length) as u32;
+            }
+            self.info = info;
+        }
+        if let Ok(tags) = parse_mp4_tags_iter(data, self.moov_offset, moov_end) {
+            self.tags = tags;
+        }
     }
 
     pub fn save(&self) -> Result<()> {
@@ -281,9 +329,9 @@ fn parse_mp4_tags_iter(data: &[u8], moov_start: usize, moov_end: usize) -> Resul
 
                 let value = parse_mp4_data_value(&key, type_indicator, value_data);
                 if let Some(v) = value {
-                    match tags.items.get_mut(&key) {
+                    match tags.get_mut(&key) {
                         Some(existing) => merge_mp4_values(existing, v),
-                        None => { tags.items.insert(key.clone(), v); }
+                        None => { tags.items.push((key.clone(), v)); }
                     }
                 }
             }

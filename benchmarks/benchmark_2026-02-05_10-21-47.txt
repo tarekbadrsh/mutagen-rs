@@ -1,0 +1,173 @@
+==========================================
+  Benchmark Run: Thu Feb  5 10:21:47 AM CET 2026
+==========================================
+
+>>> Building mutagen_rs (release)...
+📦 Built wheel for CPython 3.14 to /tmp/.tmpZ1Y6z3/mutagen_rs-0.1.0-cp314-cp314-linux_x86_64.whl
+✏️ Setting installed package as editable
+🛠 Installed mutagen-rs-0.1.0
+
+==========================================
+  Python: mutagen_rs vs mutagen
+==========================================
+
+Test files: {'mp3': 21, 'mp4': 9, 'flac': 9, 'ogg': 3}
+Iterations: 200
+
+Benchmarking mp3 (19 files)...
+  Original: 0.1431 ms/file
+  Rust:     0.0080 ms/file
+  Speedup:  17.8x [FAIL]
+
+Benchmarking flac (6 files)...
+  Original: 0.0687 ms/file
+  Rust:     0.0091 ms/file
+  Speedup:  7.5x [FAIL]
+
+Benchmarking ogg (3 files)...
+  Original: 0.1517 ms/file
+  Rust:     0.0127 ms/file
+  Speedup:  12.0x [FAIL]
+
+Benchmarking mp4 (9 files)...
+  Original: 0.1375 ms/file
+  Rust:     0.0087 ms/file
+  Speedup:  15.8x [FAIL]
+
+Benchmarking auto-detect (37 files)...
+  Original: 0.1678 ms/file
+  Rust:     0.0089 ms/file
+  Speedup:  18.8x [FAIL]
+
+==================================================
+BATCH API BENCHMARK (rayon parallel, 40 copies)
+==================================================
+
+Batch mp3 (760 unique files)...
+  Original:    0.1434 ms/file
+  Rust batch:  0.0013 ms/file  110.5x [PASS]
+
+Batch flac (280 unique files)...
+  Original:    0.0631 ms/file
+  Rust batch:  0.0025 ms/file  25.0x [FAIL]
+
+Batch ogg (120 unique files)...
+  Original:    0.1003 ms/file
+  Rust batch:  0.0049 ms/file  20.5x [FAIL]
+
+Batch mp4 (360 unique files)...
+  Original:    0.1398 ms/file
+  Rust batch:  0.0022 ms/file  63.6x [FAIL]
+
+Batch auto-detect (1520 unique files)...
+  Original:    0.1660 ms/file
+  Rust batch:  0.0016 ms/file  106.9x [PASS]
+
+==================================================
+SOME BENCHMARKS BELOW 100x TARGET
+Results saved to /home/tarek/tarek/projects/mutagen-rs/performance_results.json
+
+==========================================
+  Rust Criterion: mutagen_rs vs lofty-rs
+==========================================
+
+Benchmarking mp3_large/mutagen_rs
+Benchmarking mp3_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp3_large/mutagen_rs: Collecting 100 samples in estimated 5.0002 s (45M iterations)
+Benchmarking mp3_large/mutagen_rs: Analyzing
+mp3_large/mutagen_rs    time:   [105.51 ns 105.60 ns 105.68 ns]
+                        change: [-5.0123% -4.5631% -4.1550%] (p = 0.00 < 0.05)
+Benchmarking mp3_large/lofty
+Benchmarking mp3_large/lofty: Warming up for 3.0000 s
+Benchmarking mp3_large/lofty: Collecting 100 samples in estimated 5.0456 s (359k iterations)
+Benchmarking mp3_large/lofty: Analyzing
+mp3_large/lofty         time:   [13.907 µs 13.990 µs 14.067 µs]
+                        change: [+0.4663% +1.0190% +1.5543%] (p = 0.00 < 0.05)
+Benchmarking mp3_small/mutagen_rs
+Benchmarking mp3_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp3_small/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (45M iterations)
+Benchmarking mp3_small/mutagen_rs: Analyzing
+mp3_small/mutagen_rs    time:   [108.51 ns 108.96 ns 109.47 ns]
+                        change: [-1.9818% -1.0336% -0.0648%] (p = 0.04 < 0.05)
+Benchmarking mp3_small/lofty
+Benchmarking mp3_small/lofty: Warming up for 3.0000 s
+Benchmarking mp3_small/lofty: Collecting 100 samples in estimated 5.0147 s (1.2M iterations)
+Benchmarking mp3_small/lofty: Analyzing
+mp3_small/lofty         time:   [4.3378 µs 4.3524 µs 4.3672 µs]
+                        change: [-3.0750% -2.5142% -1.9815%] (p = 0.00 < 0.05)
+Benchmarking flac_large/mutagen_rs
+Benchmarking flac_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking flac_large/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (46M iterations)
+Benchmarking flac_large/mutagen_rs: Analyzing
+flac_large/mutagen_rs   time:   [107.31 ns 107.45 ns 107.60 ns]
+                        change: [-4.1578% -3.5765% -3.0237%] (p = 0.00 < 0.05)
+Benchmarking flac_large/lofty
+Benchmarking flac_large/lofty: Warming up for 3.0000 s
+Benchmarking flac_large/lofty: Collecting 100 samples in estimated 5.0697 s (359k iterations)
+Benchmarking flac_large/lofty: Analyzing
+flac_large/lofty        time:   [14.002 µs 14.097 µs 14.182 µs]
+                        change: [-2.5676% -1.8854% -1.1580%] (p = 0.00 < 0.05)
+Benchmarking flac_small/mutagen_rs
+Benchmarking flac_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking flac_small/mutagen_rs: Collecting 100 samples in estimated 5.0005 s (36M iterations)
+Benchmarking flac_small/mutagen_rs: Analyzing
+flac_small/mutagen_rs   time:   [139.24 ns 139.38 ns 139.51 ns]
+                        change: [-5.7215% -4.8315% -4.0635%] (p = 0.00 < 0.05)
+Benchmarking flac_small/lofty
+Benchmarking flac_small/lofty: Warming up for 3.0000 s
+Benchmarking flac_small/lofty: Collecting 100 samples in estimated 5.0014 s (1.8M iterations)
+Benchmarking flac_small/lofty: Analyzing
+flac_small/lofty        time:   [2.8308 µs 2.8429 µs 2.8565 µs]
+                        change: [+4.4700% +5.0649% +5.6911%] (p = 0.00 < 0.05)
+Benchmarking ogg_large/mutagen_rs
+Benchmarking ogg_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking ogg_large/mutagen_rs: Collecting 100 samples in estimated 5.0001 s (341M iterations)
+Benchmarking ogg_large/mutagen_rs: Analyzing
+ogg_large/mutagen_rs    time:   [14.664 ns 14.719 ns 14.781 ns]
+                        change: [-2.0720% -1.4499% -0.8431%] (p = 0.00 < 0.05)
+Benchmarking ogg_large/lofty
+Benchmarking ogg_large/lofty: Warming up for 3.0000 s
+Benchmarking ogg_large/lofty: Collecting 100 samples in estimated 5.5039 s (30k iterations)
+Benchmarking ogg_large/lofty: Analyzing
+ogg_large/lofty         time:   [180.26 µs 180.90 µs 181.74 µs]
+                        change: [-2.9341% -2.4075% -1.9226%] (p = 0.00 < 0.05)
+Benchmarking ogg_small/mutagen_rs
+Benchmarking ogg_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking ogg_small/mutagen_rs: Collecting 100 samples in estimated 5.0000 s (336M iterations)
+Benchmarking ogg_small/mutagen_rs: Analyzing
+ogg_small/mutagen_rs    time:   [15.170 ns 15.301 ns 15.443 ns]
+                        change: [+1.6632% +2.4172% +3.2247%] (p = 0.00 < 0.05)
+Benchmarking ogg_small/lofty
+Benchmarking ogg_small/lofty: Warming up for 3.0000 s
+Benchmarking ogg_small/lofty: Collecting 100 samples in estimated 5.0011 s (7.5M iterations)
+Benchmarking ogg_small/lofty: Analyzing
+ogg_small/lofty         time:   [651.59 ns 655.72 ns 660.48 ns]
+                        change: [-0.9695% +0.3195% +1.5512%] (p = 0.63 > 0.05)
+Benchmarking mp4_large/mutagen_rs
+Benchmarking mp4_large/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp4_large/mutagen_rs: Collecting 100 samples in estimated 5.0003 s (74M iterations)
+Benchmarking mp4_large/mutagen_rs: Analyzing
+mp4_large/mutagen_rs    time:   [65.626 ns 66.041 ns 66.494 ns]
+                        change: [-0.8732% +0.2110% +1.0857%] (p = 0.71 > 0.05)
+Benchmarking mp4_large/lofty
+Benchmarking mp4_large/lofty: Warming up for 3.0000 s
+Benchmarking mp4_large/lofty: Collecting 100 samples in estimated 5.0079 s (293k iterations)
+Benchmarking mp4_large/lofty: Analyzing
+mp4_large/lofty         time:   [17.028 µs 17.125 µs 17.229 µs]
+                        change: [-0.7723% +0.1696% +1.1424%] (p = 0.73 > 0.05)
+Benchmarking mp4_small/mutagen_rs
+Benchmarking mp4_small/mutagen_rs: Warming up for 3.0000 s
+Benchmarking mp4_small/mutagen_rs: Collecting 100 samples in estimated 5.0002 s (87M iterations)
+Benchmarking mp4_small/mutagen_rs: Analyzing
+mp4_small/mutagen_rs    time:   [56.696 ns 57.080 ns 57.542 ns]
+                        change: [+1.6904% +2.9446% +4.2535%] (p = 0.00 < 0.05)
+Benchmarking mp4_small/lofty
+Benchmarking mp4_small/lofty: Warming up for 3.0000 s
+Benchmarking mp4_small/lofty: Collecting 100 samples in estimated 5.0026 s (2.1M iterations)
+Benchmarking mp4_small/lofty: Analyzing
+mp4_small/lofty         time:   [2.3339 µs 2.3456 µs 2.3597 µs]
+                        change: [+3.6567% +4.7159% +5.8462%] (p = 0.00 < 0.05)
+
+==========================================
+  Done: Thu Feb  5 10:25:58 AM CET 2026
+==========================================

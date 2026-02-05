@@ -135,7 +135,12 @@ impl PyID3 {
         });
 
         let hash_key = frame.hash_key();
-        self.tags.frames.insert(hash_key, vec![id3::tags::LazyFrame::Decoded(frame)]);
+        // Replace existing or push new (Vec-based tag storage)
+        if let Some((_, frames)) = self.tags.frames.iter_mut().find(|(k, _)| k == &hash_key) {
+            *frames = vec![id3::tags::LazyFrame::Decoded(frame)];
+        } else {
+            self.tags.frames.push((hash_key, vec![id3::tags::LazyFrame::Decoded(frame)]));
+        }
         Ok(())
     }
 
@@ -210,7 +215,8 @@ struct PyMP3 {
 impl PyMP3 {
     #[inline(always)]
     fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
-        let mp3_file = mp3::MP3File::parse(data, filename)?;
+        let mut mp3_file = mp3::MP3File::parse(data, filename)?;
+        mp3_file.ensure_tags_parsed(data);
         let info = make_mpeg_info(&mp3_file.info);
         let version = mp3_file.id3_header.as_ref().map(|h| h.version).unwrap_or((4, 0));
 
@@ -394,7 +400,7 @@ struct PyFLAC {
 impl PyFLAC {
     #[inline(always)]
     fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
-        let flac_file = flac::FLACFile::parse(data, filename)?;
+        let mut flac_file = flac::FLACFile::parse(data, filename)?;
 
         let info = PyStreamInfo {
             length: flac_file.info.length,
@@ -408,6 +414,8 @@ impl PyFLAC {
             max_frame_size: flac_file.info.max_frame_size,
         };
 
+        // Lazily parse VorbisComment (only when accessed via Python)
+        flac_file.ensure_tags();
         let vc_data = flac_file.tags.clone().unwrap_or_else(|| vorbis::VorbisComment::new());
 
         Ok(PyFLAC {
@@ -507,7 +515,9 @@ struct PyOggVorbis {
 impl PyOggVorbis {
     #[inline(always)]
     fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
-        let ogg_file = ogg::OggVorbisFile::parse(data, filename)?;
+        let mut ogg_file = ogg::OggVorbisFile::parse(data, filename)?;
+        ogg_file.ensure_full_parse(data);
+        ogg_file.ensure_tags();
 
         let info = PyOggVorbisInfo {
             length: ogg_file.info.length,
@@ -628,7 +638,7 @@ impl PyMP4Tags {
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.tags.items.contains_key(key)
+        self.tags.contains_key(key)
     }
 
     fn __len__(&self) -> usize {
@@ -660,7 +670,8 @@ struct PyMP4 {
 impl PyMP4 {
     #[inline(always)]
     fn from_data(data: &[u8], filename: &str) -> PyResult<Self> {
-        let mp4_file = mp4::MP4File::parse(data, filename)?;
+        let mut mp4_file = mp4::MP4File::parse(data, filename)?;
+        mp4_file.ensure_parsed_with_data(data);
 
         let info = PyMP4Info {
             length: mp4_file.info.length,
@@ -712,7 +723,7 @@ impl PyMP4 {
     }
 
     fn __contains__(&self, key: &str) -> bool {
-        self.mp4_tags.tags.items.contains_key(key)
+        self.mp4_tags.tags.contains_key(key)
     }
 
     fn __repr__(&self) -> String {
@@ -1139,10 +1150,11 @@ fn mp4_value_to_batch(value: &mp4::MP4TagValue) -> BatchTagValue {
 #[inline(always)]
 fn parse_mp3_batch(data: &[u8], path: &str) -> Option<PreSerializedFile> {
     let mut f = mp3::MP3File::parse(data, path).ok()?;
+    f.ensure_tags_parsed(data);
     let mut tags = Vec::with_capacity(f.tags.frames.len());
     for (hash_key, frames) in f.tags.frames.iter_mut() {
         if let Some(lf) = frames.first_mut() {
-            if let Ok(frame) = lf.decode() {
+            if let Ok(frame) = lf.decode_with_buf(&f.tags.raw_buf) {
                 tags.push((hash_key.as_str().to_string(), frame_to_batch_value(frame)));
             }
         }
@@ -1159,9 +1171,10 @@ fn parse_mp3_batch(data: &[u8], path: &str) -> Option<PreSerializedFile> {
 /// Parse MP4 data into batch result.
 #[inline(always)]
 fn parse_mp4_batch(data: &[u8], path: &str) -> Option<PreSerializedFile> {
-    let f = mp4::MP4File::parse(data, path).ok()?;
+    let mut f = mp4::MP4File::parse(data, path).ok()?;
+    f.ensure_parsed_with_data(data);
     let mut tags = Vec::with_capacity(f.tags.items.len());
-    for (key, value) in &f.tags.items {
+    for (key, value) in f.tags.items.iter() {
         tags.push((key.clone(), mp4_value_to_batch(value)));
     }
     Some(PreSerializedFile {

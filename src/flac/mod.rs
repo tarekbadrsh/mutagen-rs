@@ -236,16 +236,27 @@ pub struct LazyPicture {
     pub block_size: usize,
 }
 
+/// Lightweight block descriptor — stores position only, no data copy.
+#[derive(Debug, Clone)]
+pub struct BlockDesc {
+    pub block_type: BlockType,
+    pub is_last: bool,
+    pub data_offset: usize,
+    pub data_size: usize,
+}
+
 /// Complete FLAC file handler.
 #[derive(Debug)]
 pub struct FLACFile {
     pub info: StreamInfo,
     pub tags: Option<VorbisComment>,
+    pub vc_raw: Option<Vec<u8>>,           // Raw VC bytes for lazy parsing
     pub pictures: Vec<FLACPicture>,
     pub lazy_pictures: Vec<LazyPicture>,
-    pub metadata_blocks: Vec<MetadataBlock>,
+    pub block_descs: Vec<BlockDesc>,       // Lightweight descriptors (no data copies)
     pub path: String,
-    pub metadata_length: usize, // total bytes of fLaC + metadata blocks
+    pub metadata_length: usize,
+    pub flac_offset: usize,
 }
 
 impl FLACFile {
@@ -283,9 +294,9 @@ impl FLACFile {
 
     fn parse_from_offset(data: &[u8], flac_offset: usize, path: &str) -> Result<Self> {
         let mut pos = flac_offset + 4; // Skip fLaC magic
-        let mut blocks = Vec::new();
+        let mut block_descs = Vec::new();
         let mut stream_info = None;
-        let mut tags = None;
+        let mut vc_raw = None;
         let mut lazy_pictures = Vec::new();
 
         loop {
@@ -303,50 +314,29 @@ impl FLACFile {
                 break;
             }
 
+            // Store lightweight descriptor (no data copy)
+            block_descs.push(BlockDesc {
+                block_type,
+                is_last,
+                data_offset: pos,
+                data_size: block_size,
+            });
+
             match block_type {
                 BlockType::StreamInfo => {
                     stream_info = Some(StreamInfo::parse(&data[pos..pos + block_size])?);
-                    // Store raw data for save()
-                    blocks.push(MetadataBlock {
-                        block_type,
-                        is_last,
-                        data: data[pos..pos + block_size].to_vec(),
-                    });
                 }
                 BlockType::VorbisComment => {
-                    tags = Some(VorbisComment::parse(&data[pos..pos + block_size], false)?);
-                    blocks.push(MetadataBlock {
-                        block_type,
-                        is_last,
-                        data: Vec::new(), // Regenerated from parsed struct on save
-                    });
+                    // Lazy: store raw bytes, don't parse yet
+                    vc_raw = Some(data[pos..pos + block_size].to_vec());
                 }
                 BlockType::Picture => {
-                    // Lazy: just record offset, don't copy picture data
                     lazy_pictures.push(LazyPicture {
                         block_offset: pos,
                         block_size,
                     });
-                    blocks.push(MetadataBlock {
-                        block_type,
-                        is_last,
-                        data: Vec::new(),
-                    });
                 }
-                BlockType::Padding => {
-                    blocks.push(MetadataBlock {
-                        block_type,
-                        is_last,
-                        data: Vec::new(),
-                    });
-                }
-                _ => {
-                    blocks.push(MetadataBlock {
-                        block_type,
-                        is_last,
-                        data: data[pos..pos + block_size].to_vec(),
-                    });
-                }
+                _ => {}
             }
 
             pos += block_size;
@@ -360,13 +350,30 @@ impl FLACFile {
 
         Ok(FLACFile {
             info,
-            tags,
-            pictures: Vec::new(), // Empty - use lazy_pictures instead
+            tags: None,
+            vc_raw,
+            pictures: Vec::new(),
             lazy_pictures,
-            metadata_blocks: blocks,
+            block_descs,
             path: path.to_string(),
             metadata_length: pos - flac_offset,
+            flac_offset,
         })
+    }
+
+    /// Lazily parse VorbisComment from raw bytes if not yet parsed.
+    pub fn ensure_tags(&mut self) {
+        if self.tags.is_none() {
+            if let Some(ref raw) = self.vc_raw {
+                self.tags = VorbisComment::parse(raw, false).ok();
+            }
+        }
+    }
+
+    /// Get tags, parsing lazily if needed.
+    pub fn get_tags(&mut self) -> Option<&VorbisComment> {
+        self.ensure_tags();
+        self.tags.as_ref()
     }
 
     /// Save metadata back to the FLAC file.
@@ -391,17 +398,16 @@ impl FLACFile {
 
         // Rebuild metadata blocks
         let mut new_metadata = Vec::new();
-
-        // fLaC magic
         new_metadata.extend_from_slice(b"fLaC");
 
-        // Collect blocks to write
         let mut blocks_to_write: Vec<(BlockType, Vec<u8>)> = Vec::new();
 
-        // StreamInfo (always first)
-        for block in &self.metadata_blocks {
-            if block.block_type == BlockType::StreamInfo {
-                blocks_to_write.push((BlockType::StreamInfo, block.data.clone()));
+        // StreamInfo (always first) - read from existing file using descriptor
+        for bd in &self.block_descs {
+            if bd.block_type == BlockType::StreamInfo {
+                if bd.data_offset + bd.data_size <= existing.len() {
+                    blocks_to_write.push((BlockType::StreamInfo, existing[bd.data_offset..bd.data_offset + bd.data_size].to_vec()));
+                }
                 break;
             }
         }
@@ -409,32 +415,34 @@ impl FLACFile {
         // Vorbis comment
         if let Some(ref vc) = self.tags {
             blocks_to_write.push((BlockType::VorbisComment, vc.render(false)));
+        } else if let Some(ref raw) = self.vc_raw {
+            blocks_to_write.push((BlockType::VorbisComment, raw.clone()));
         }
 
-        // Pictures (from lazy or parsed)
+        // Pictures
         for pic in &self.pictures {
             blocks_to_write.push((BlockType::Picture, pic.render()));
         }
-        // Re-read lazy pictures from original data
         for lp in &self.lazy_pictures {
             if lp.block_offset + lp.block_size <= existing.len() {
                 blocks_to_write.push((BlockType::Picture, existing[lp.block_offset..lp.block_offset + lp.block_size].to_vec()));
             }
         }
 
-        // Other blocks (skip StreamInfo, VorbisComment, Picture, Padding)
-        for block in &self.metadata_blocks {
-            match block.block_type {
+        // Other blocks from descriptors (skip StreamInfo, VC, Picture, Padding)
+        for bd in &self.block_descs {
+            match bd.block_type {
                 BlockType::StreamInfo | BlockType::VorbisComment | BlockType::Picture | BlockType::Padding => {}
                 _ => {
-                    blocks_to_write.push((block.block_type, block.data.clone()));
+                    if bd.data_offset + bd.data_size <= existing.len() {
+                        blocks_to_write.push((bd.block_type, existing[bd.data_offset..bd.data_offset + bd.data_size].to_vec()));
+                    }
                 }
             }
         }
 
-        // Add padding
-        let padding_size = 1024;
-        blocks_to_write.push((BlockType::Padding, vec![0u8; padding_size]));
+        // Padding
+        blocks_to_write.push((BlockType::Padding, vec![0u8; 1024]));
 
         // Write blocks with proper headers
         for (i, (block_type, block_data)) in blocks_to_write.iter().enumerate() {
@@ -444,7 +452,6 @@ impl FLACFile {
             } else {
                 block_type.to_byte()
             };
-
             new_metadata.push(header_byte);
             let size = block_data.len() as u32;
             new_metadata.push((size >> 16) as u8);
@@ -457,7 +464,6 @@ impl FLACFile {
         let audio_start = flac_offset + self.metadata_length;
         let audio_data = &existing[audio_start..];
 
-        // Write the file
         file.seek(SeekFrom::Start(flac_offset as u64))?;
         file.set_len(flac_offset as u64)?;
         file.write_all(&new_metadata)?;

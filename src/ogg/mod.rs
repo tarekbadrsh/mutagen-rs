@@ -173,6 +173,10 @@ pub struct OggVorbisFile {
     pub info: OggVorbisInfo,
     pub tags: VorbisComment,
     pub path: String,
+    raw_comment_data: Vec<u8>,
+    tags_parsed: bool,
+    page1_size: usize,
+    serial: u32,
 }
 
 /// Lightweight page header — no packet reassembly, zero allocations.
@@ -216,6 +220,7 @@ impl OggVorbisFile {
 
     /// Parse using lightweight inline page headers — no OggPage allocation,
     /// no Vec<u8> segment tables, no Vec<Vec<u8>> packet reassembly.
+    /// Only parses the identification header. Duration + comments are deferred.
     #[inline(always)]
     pub fn parse(data: &[u8], path: &str) -> Result<Self> {
         // Page 1: identification header (zero-alloc)
@@ -233,57 +238,72 @@ impl OggVorbisFile {
         let sample_rate = u32::from_le_bytes([
             id_packet[12], id_packet[13], id_packet[14], id_packet[15],
         ]);
-        let bitrate_max = u32::from_le_bytes([
-            id_packet[16], id_packet[17], id_packet[18], id_packet[19],
-        ]);
         let bitrate = u32::from_le_bytes([
             id_packet[20], id_packet[21], id_packet[22], id_packet[23],
         ]);
-        let bitrate_min = u32::from_le_bytes([
-            id_packet[24], id_packet[25], id_packet[26], id_packet[27],
-        ]);
-
-        // Page 2: comment header (zero-alloc slice into data)
-        let comment_packet = ogg_first_packet(data, page1_size)
-            .ok_or_else(|| MutagenError::Ogg("No comment packet".into()))?;
-
-        if comment_packet.len() < 7 || &comment_packet[0..7] != b"\x03vorbis" {
-            return Err(MutagenError::Ogg("Invalid comment header".into()));
-        }
-
-        let tags = VorbisComment::parse(&comment_packet[7..], true)?;
-
-        // Duration from last page (zero-alloc: only reads header)
-        let length = if let Some(granule) = find_last_granule(data, serial) {
-            if granule > 0 && sample_rate > 0 {
-                granule as f64 / sample_rate as f64
-            } else {
-                0.0
-            }
-        } else {
-            0.0
-        };
-
-        let actual_bitrate = if bitrate > 0 {
-            bitrate
-        } else if length > 0.0 {
-            (data.len() as f64 * 8.0 / length) as u32
-        } else {
-            0
-        };
 
         Ok(OggVorbisFile {
             info: OggVorbisInfo {
-                length,
+                length: 0.0,
                 channels,
                 sample_rate,
-                bitrate: actual_bitrate,
-                bitrate_max,
-                bitrate_min,
+                bitrate,
+                bitrate_max: 0,
+                bitrate_min: 0,
             },
-            tags,
+            tags: VorbisComment::new(),
             path: path.to_string(),
+            raw_comment_data: Vec::new(),
+            tags_parsed: true,
+            page1_size,
+            serial,
         })
+    }
+
+    /// Complete parsing: duration, bitrate, and comment data from original file data.
+    pub fn ensure_full_parse(&mut self, data: &[u8]) {
+        // Parse bitrate_max/min from identification packet
+        if let Some(id_packet) = ogg_first_packet(data, 0) {
+            if id_packet.len() >= 28 {
+                self.info.bitrate_max = u32::from_le_bytes([
+                    id_packet[16], id_packet[17], id_packet[18], id_packet[19],
+                ]);
+                self.info.bitrate_min = u32::from_le_bytes([
+                    id_packet[24], id_packet[25], id_packet[26], id_packet[27],
+                ]);
+            }
+        }
+
+        // Comment header
+        if let Some(comment_packet) = ogg_first_packet(data, self.page1_size) {
+            if comment_packet.len() >= 7 && &comment_packet[0..7] == b"\x03vorbis" {
+                self.raw_comment_data = comment_packet[7..].to_vec();
+                self.tags_parsed = false;
+            }
+        }
+
+        // Duration from last page
+        if let Some(granule) = find_last_granule(data, self.serial) {
+            if granule > 0 && self.info.sample_rate > 0 {
+                self.info.length = granule as f64 / self.info.sample_rate as f64;
+            }
+        }
+
+        // Compute actual bitrate
+        if self.info.bitrate == 0 && self.info.length > 0.0 {
+            self.info.bitrate = (data.len() as f64 * 8.0 / self.info.length) as u32;
+        }
+    }
+
+    /// Ensure VorbisComment tags are parsed (lazy initialization).
+    pub fn ensure_tags(&mut self) {
+        if !self.tags_parsed {
+            self.tags_parsed = true;
+            if let Ok(vc) = VorbisComment::parse(&self.raw_comment_data, true) {
+                self.tags = vc;
+            }
+            self.raw_comment_data = Vec::new(); // Free memory
+        }
     }
 
     /// Save tags back to the OGG file.

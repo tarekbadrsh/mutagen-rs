@@ -107,9 +107,9 @@ impl XingHeader {
             if pos + 100 > data.len() {
                 return None;
             }
-            let t = data[pos..pos + 100].to_vec();
+            // Skip TOC data without copying (saves allocation)
             pos += 100;
-            Some(t)
+            None
         } else {
             None
         };

@@ -1,0 +1,68 @@
+==========================================
+  Benchmark Run: Thu Feb  5 10:01:58 AM CET 2026
+==========================================
+
+>>> Building mutagen_rs (release)...
+📦 Built wheel for CPython 3.14 to /tmp/.tmpl0hhGj/mutagen_rs-0.1.0-cp314-cp314-linux_x86_64.whl
+✏️ Setting installed package as editable
+🛠 Installed mutagen-rs-0.1.0
+
+==========================================
+  Python: mutagen_rs vs mutagen
+==========================================
+
+Test files: {'mp3': 21, 'mp4': 9, 'flac': 9, 'ogg': 3}
+Iterations: 200
+
+Benchmarking mp3 (19 files)...
+  Original: 0.1504 ms/file
+  Rust:     0.0083 ms/file
+  Speedup:  18.1x [FAIL]
+
+Benchmarking flac (6 files)...
+  Original: 0.0702 ms/file
+  Rust:     0.0095 ms/file
+  Speedup:  7.4x [FAIL]
+
+Benchmarking ogg (3 files)...
+  Original: 0.1559 ms/file
+  Rust:     0.0126 ms/file
+  Speedup:  12.4x [FAIL]
+
+Benchmarking mp4 (9 files)...
+  Original: 0.1377 ms/file
+  Rust:     0.0096 ms/file
+  Speedup:  14.3x [FAIL]
+
+Benchmarking auto-detect (37 files)...
+  Original: 0.1714 ms/file
+  Rust:     0.0092 ms/file
+  Speedup:  18.5x [FAIL]
+
+==================================================
+BATCH API BENCHMARK (rayon parallel, 40 copies)
+==================================================
+
+Batch mp3 (760 unique files)...
+  Original:    0.1471 ms/file
+  Rust batch:  0.0015 ms/file  95.5x [FAIL]
+
+Batch flac (280 unique files)...
+  Original:    0.0648 ms/file
+  Rust batch:  0.0024 ms/file  27.2x [FAIL]
+
+Batch ogg (120 unique files)...
+  Original:    0.0998 ms/file
+  Rust batch:  0.0050 ms/file  19.8x [FAIL]
+
+Batch mp4 (360 unique files)...
+  Original:    0.1440 ms/file
+  Rust batch:  0.0025 ms/file  58.4x [FAIL]
+
+Batch auto-detect (1520 unique files)...
+  Original:    0.1702 ms/file
+  Rust batch:  0.0017 ms/file  101.9x [PASS]
+
+==================================================
+SOME BENCHMARKS BELOW 100x TARGET
+Results saved to /home/tarek/tarek/projects/mutagen-rs/performance_results.json

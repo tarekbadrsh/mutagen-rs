@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use crate::common::error::{MutagenError, Result};
 use crate::id3::header::{ID3Header, BitPaddedInt, determine_bpi};
 use crate::id3::frames::{self, Frame, HashKey, convert_v22_frame_id, parse_v22_picture_frame};
+use crate::id3::specs;
 use crate::id3::unsynch;
 
 /// A lazy frame that stores raw data and decodes on first access.
@@ -11,6 +11,8 @@ pub enum LazyFrame {
     Decoded(Frame),
     /// Raw frame data that hasn't been decoded yet.
     Raw { id: String, data: Vec<u8> },
+    /// Zero-allocation frame: stores offset into parent ID3Tags.raw_buf.
+    Slice { id: [u8; 4], offset: u32, len: u32 },
 }
 
 impl LazyFrame {
@@ -18,20 +20,10 @@ impl LazyFrame {
     pub fn hash_key(&self) -> HashKey {
         match self {
             LazyFrame::Decoded(f) => f.hash_key(),
-            LazyFrame::Raw { id, data } => {
-                // For most frames, the hash key is just the ID.
-                // For TXXX, WXXX, COMM, USLT, APIC, POPM we'd need to decode.
-                // Optimistic: just use the ID for now; we decode on access.
-                match id.as_str() {
-                    "TXXX" | "WXXX" | "COMM" | "USLT" | "APIC" | "POPM" => {
-                        // Must decode to get proper hash key
-                        match frames::parse_frame(id, data) {
-                            Ok(f) => f.hash_key(),
-                            Err(_) => HashKey::new(id),
-                        }
-                    }
-                    _ => HashKey::new(id),
-                }
+            LazyFrame::Raw { id, data } => quick_hash_key(id, data),
+            LazyFrame::Slice { id, .. } => {
+                let s = std::str::from_utf8(id).unwrap_or("XXXX");
+                HashKey::new(s)
             }
         }
     }
@@ -41,14 +33,30 @@ impl LazyFrame {
         match self {
             LazyFrame::Decoded(f) => f.frame_id(),
             LazyFrame::Raw { id, .. } => id,
+            LazyFrame::Slice { id, .. } => std::str::from_utf8(id).unwrap_or("XXXX"),
         }
     }
 
     /// Force decode the frame, returning a reference to the decoded frame.
+    /// For Slice frames, use decode_with_buf instead.
     pub fn decode(&mut self) -> Result<&Frame> {
-        if let LazyFrame::Raw { id, data } = self {
-            let frame = frames::parse_frame(id, data)?;
-            *self = LazyFrame::Decoded(frame);
+        self.decode_with_buf(&[])
+    }
+
+    /// Decode the frame using a buffer (needed for Slice variant).
+    pub fn decode_with_buf(&mut self, buf: &[u8]) -> Result<&Frame> {
+        match self {
+            LazyFrame::Decoded(_) => {}
+            LazyFrame::Raw { id, data } => {
+                let frame = frames::parse_frame(id, data)?;
+                *self = LazyFrame::Decoded(frame);
+            }
+            LazyFrame::Slice { id, offset, len } => {
+                let id_str = std::str::from_utf8(&id[..]).unwrap_or("XXXX");
+                let data = &buf[*offset as usize..(*offset as usize + *len as usize)];
+                let frame = frames::parse_frame(id_str, data)?;
+                *self = LazyFrame::Decoded(frame);
+            }
         }
         match self {
             LazyFrame::Decoded(f) => Ok(f),
@@ -69,65 +77,61 @@ impl LazyFrame {
         match self {
             LazyFrame::Decoded(f) => Ok(f),
             LazyFrame::Raw { id, data } => frames::parse_frame(&id, &data),
+            LazyFrame::Slice { .. } => {
+                Err(MutagenError::ID3("Cannot decode Slice without buffer".into()))
+            }
         }
     }
 }
 
 /// Container for ID3v2 frames, providing dict-like access.
+/// Uses Vec instead of HashMap for better cache locality and lower allocation overhead
+/// (typical MP3 files have <20 unique frame types).
 #[derive(Debug, Clone)]
 pub struct ID3Tags {
-    pub frames: HashMap<HashKey, Vec<LazyFrame>>,
+    pub frames: Vec<(HashKey, Vec<LazyFrame>)>,
     pub version: (u8, u8),
     pub unknown_frames: Vec<(String, Vec<u8>)>,
+    pub(crate) raw_buf: Vec<u8>,
 }
 
 impl ID3Tags {
     pub fn new() -> Self {
         ID3Tags {
-            frames: HashMap::with_capacity(16),
+            frames: Vec::with_capacity(16),
             version: (4, 0),
             unknown_frames: Vec::new(),
+            raw_buf: Vec::new(),
         }
     }
 
     /// Add a decoded frame.
     pub fn add(&mut self, frame: Frame) {
         let key = frame.hash_key();
-        self.frames.entry(key).or_insert_with(Vec::new).push(LazyFrame::Decoded(frame));
+        if let Some((_, frames)) = self.frames.iter_mut().find(|(k, _)| k == &key) {
+            frames.push(LazyFrame::Decoded(frame));
+        } else {
+            self.frames.push((key, vec![LazyFrame::Decoded(frame)]));
+        }
     }
 
     /// Add a raw (lazy) frame.
     pub fn add_raw(&mut self, id: String, data: Vec<u8>) {
-        // Fast path: for most frames, hash key is just the frame ID.
-        // Only TXXX, WXXX, COMM, USLT, APIC, POPM need decode for proper hash key.
-        let needs_decode = matches!(id.as_str(), "TXXX" | "WXXX" | "COMM" | "USLT" | "APIC" | "POPM");
-        let key = if needs_decode {
-            // Must decode to get proper hash key
-            match frames::parse_frame(&id, &data) {
-                Ok(f) => f.hash_key(),
-                Err(_) => HashKey::new(&id),
-            }
-        } else {
-            HashKey::new(&id)
-        };
+        let key = quick_hash_key(&id, &data);
         let lazy = LazyFrame::Raw { id, data };
-        self.frames.entry(key).or_insert_with(Vec::new).push(lazy);
+        if let Some((_, frames)) = self.frames.iter_mut().find(|(k, _)| k == &key) {
+            frames.push(lazy);
+        } else {
+            self.frames.push((key, vec![lazy]));
+        }
     }
 
     /// Get all frames with the given key (forces decode).
     pub fn getall(&self, key: &str) -> Vec<&Frame> {
         let hash_key = HashKey::new(key);
-        match self.frames.get(&hash_key) {
-            Some(frames) => {
-                frames.iter().filter_map(|lf| {
-                    match lf {
-                        LazyFrame::Decoded(f) => Some(f),
-                        LazyFrame::Raw { id, data } => {
-                            // Can't decode in immutable context, skip raw frames
-                            None
-                        }
-                    }
-                }).collect()
+        match self.frames.iter().find(|(k, _)| k == &hash_key) {
+            Some((_, frames)) => {
+                frames.iter().filter_map(|lf| lf.get_decoded()).collect()
             }
             None => vec![],
         }
@@ -136,9 +140,9 @@ impl ID3Tags {
     /// Get all frames with given key, decoding if needed (mutable version).
     pub fn getall_mut(&mut self, key: &str) -> Vec<&Frame> {
         let hash_key = HashKey::new(key);
-        if let Some(frames) = self.frames.get_mut(&hash_key) {
+        if let Some((_, frames)) = self.frames.iter_mut().find(|(k, _)| k == &hash_key) {
             for lf in frames.iter_mut() {
-                let _ = lf.decode();
+                let _ = lf.decode_with_buf(&self.raw_buf);
             }
         }
         self.getall(key)
@@ -152,9 +156,9 @@ impl ID3Tags {
     /// Get first frame, decoding if needed.
     pub fn get_mut(&mut self, key: &str) -> Option<&Frame> {
         let hash_key = HashKey::new(key);
-        if let Some(frames) = self.frames.get_mut(&hash_key) {
+        if let Some((_, frames)) = self.frames.iter_mut().find(|(k, _)| k == &hash_key) {
             if let Some(lf) = frames.first_mut() {
-                let _ = lf.decode();
+                let _ = lf.decode_with_buf(&self.raw_buf);
             }
         }
         self.get(key)
@@ -163,33 +167,37 @@ impl ID3Tags {
     /// Set all frames for a given key (replaces existing).
     pub fn setall(&mut self, key: &str, frames_list: Vec<Frame>) {
         let hash_key = HashKey::new(key);
-        self.frames.insert(hash_key, frames_list.into_iter().map(LazyFrame::Decoded).collect());
+        let new_frames: Vec<LazyFrame> = frames_list.into_iter().map(LazyFrame::Decoded).collect();
+        if let Some((_, frames)) = self.frames.iter_mut().find(|(k, _)| k == &hash_key) {
+            *frames = new_frames;
+        } else {
+            self.frames.push((hash_key, new_frames));
+        }
     }
 
     /// Delete all frames with the given key.
     pub fn delall(&mut self, key: &str) {
         let hash_key = HashKey::new(key);
-        self.frames.remove(&hash_key);
+        self.frames.retain(|(k, _)| k != &hash_key);
     }
 
     /// Get all keys.
     pub fn keys(&self) -> Vec<String> {
-        self.frames.keys().map(|k| k.as_str().to_string()).collect()
+        self.frames.iter().map(|(k, _)| k.as_str().to_string()).collect()
     }
 
     /// Get all decoded frames as a flat list.
     pub fn values(&self) -> Vec<&Frame> {
-        self.frames.values().flat_map(|v| {
+        self.frames.iter().flat_map(|(_, v)| {
             v.iter().filter_map(|lf| lf.get_decoded())
         }).collect()
     }
 
     /// Decode all frames and return as flat list.
     pub fn values_decoded(&mut self) -> Vec<&Frame> {
-        // First decode all
-        for frames in self.frames.values_mut() {
+        for (_, frames) in self.frames.iter_mut() {
             for lf in frames.iter_mut() {
-                let _ = lf.decode();
+                let _ = lf.decode_with_buf(&self.raw_buf);
             }
         }
         self.values()
@@ -202,6 +210,11 @@ impl ID3Tags {
 
     pub fn is_empty(&self) -> bool {
         self.frames.is_empty()
+    }
+
+    /// Check if a key exists (Vec-based linear scan).
+    pub fn contains_key(&self, key: &HashKey) -> bool {
+        self.frames.iter().any(|(k, _)| k == key)
     }
 
     /// Parse frames from raw tag data.
@@ -237,6 +250,9 @@ impl ID3Tags {
         };
 
         self.version = header.version;
+
+        // Store raw tag data for Slice-based zero-alloc frame storage
+        self.raw_buf = data.to_vec();
 
         if version == 2 {
             self.read_v22_frames(data, offset)?;
@@ -349,8 +365,19 @@ impl ID3Tags {
             let id_str = std::str::from_utf8(id_bytes).unwrap_or("XXXX");
 
             // Fast path: no flags that require data mutation (common case)
+            // Use Slice frames: zero allocation (no String for ID, no Vec for data)
             if !encrypted && !compressed && !unsynchronised && !has_data_length {
-                self.add_raw(id_str.to_string(), data[offset..offset + size].to_vec());
+                let id_arr: [u8; 4] = [id_bytes[0], id_bytes[1], id_bytes[2], id_bytes[3]];
+                let frame_offset = offset as u32;
+                let frame_len = size as u32;
+                // Compute hash key directly from raw data (no full parse)
+                let key = quick_hash_key(id_str, &data[offset..offset + size]);
+                let lazy = LazyFrame::Slice { id: id_arr, offset: frame_offset, len: frame_len };
+                if let Some((_, frames)) = self.frames.iter_mut().find(|(k, _)| k == &key) {
+                    frames.push(lazy);
+                } else {
+                    self.frames.push((key, vec![lazy]));
+                }
                 offset += size;
                 continue;
             }
@@ -393,7 +420,7 @@ impl ID3Tags {
     pub fn render(&self, version: u8) -> Result<Vec<u8>> {
         let mut data = Vec::with_capacity(4096);
 
-        for frames_list in self.frames.values() {
+        for (_, frames_list) in self.frames.iter() {
             for lf in frames_list {
                 let (id, frame_data) = match lf {
                     LazyFrame::Decoded(frame) => {
@@ -402,6 +429,11 @@ impl ID3Tags {
                     LazyFrame::Raw { id, data } => {
                         // Re-serialize raw data as-is
                         (id.clone(), data.clone())
+                    }
+                    LazyFrame::Slice { id, offset, len } => {
+                        let id_str = std::str::from_utf8(&id[..]).unwrap_or("XXXX").to_string();
+                        let slice_data = self.raw_buf[*offset as usize..(*offset as usize + *len as usize)].to_vec();
+                        (id_str, slice_data)
                     }
                 };
 
@@ -425,6 +457,67 @@ impl ID3Tags {
 
         Ok(data)
     }
+}
+
+/// Extract hash key from raw frame bytes without full frame parsing.
+/// For special frames (TXXX, WXXX, COMM, USLT, APIC, POPM), reads only
+/// the description/email header bytes to build the key. Avoids copying
+/// large frame data (critical for APIC picture frames which can be 200KB+).
+#[inline]
+fn quick_hash_key(id: &str, data: &[u8]) -> HashKey {
+    match id {
+        "TXXX" | "WXXX" => {
+            if data.is_empty() { return HashKey::new(id); }
+            if let Ok(enc) = specs::Encoding::from_byte(data[0]) {
+                if let Ok((desc, _)) = specs::read_encoded_text(&data[1..], enc) {
+                    return HashKey::from_string(format!("{}:{}", id, desc));
+                }
+            }
+            HashKey::new(id)
+        }
+        "COMM" | "USLT" => {
+            if data.len() < 4 { return HashKey::new(id); }
+            if let Ok(enc) = specs::Encoding::from_byte(data[0]) {
+                let lang = std::str::from_utf8(&data[1..4]).unwrap_or("XXX");
+                if let Ok((desc, _)) = specs::read_encoded_text(&data[4..], enc) {
+                    return HashKey::from_string(format!("{}:{}:{}", id, desc, lang));
+                }
+            }
+            HashKey::new(id)
+        }
+        "APIC" => {
+            if data.is_empty() { return HashKey::new("APIC"); }
+            if let Ok(enc) = specs::Encoding::from_byte(data[0]) {
+                // Skip MIME (null-term Latin1)
+                if let Ok((_, mime_consumed)) = specs::read_latin1_text(&data[1..]) {
+                    let after_mime = 1 + mime_consumed;
+                    // Skip pic_type (1 byte)
+                    let after_type = after_mime + 1;
+                    if after_type < data.len() {
+                        if let Ok((desc, _)) = specs::read_encoded_text(&data[after_type..], enc) {
+                            return HashKey::from_string(format!("APIC:{}", desc));
+                        }
+                    }
+                }
+            }
+            HashKey::new("APIC")
+        }
+        "POPM" => {
+            if let Ok((email, _)) = specs::read_latin1_text(data) {
+                return HashKey::from_string(format!("POPM:{}", email));
+            }
+            HashKey::new("POPM")
+        }
+        _ => HashKey::new(id),
+    }
+}
+
+/// Quick hash key extraction for Slice variant using raw_buf data.
+#[inline]
+fn quick_hash_key_from_buf(id: &[u8; 4], buf: &[u8], offset: u32, len: u32) -> HashKey {
+    let id_str = std::str::from_utf8(id).unwrap_or("XXXX");
+    let data = &buf[offset as usize..(offset as usize + len as usize)];
+    quick_hash_key(id_str, data)
 }
 
 fn decompress_zlib(data: &[u8]) -> Result<Vec<u8>> {

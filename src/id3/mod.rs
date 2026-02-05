@@ -51,7 +51,7 @@ pub fn load_id3(path: &str) -> Result<(ID3Tags, Option<ID3Header>)> {
                     let v1_frames = id3v1::parse_id3v1(&v1_buf)?;
                     for frame in v1_frames {
                         let key = frame.hash_key();
-                        if !tags.frames.contains_key(&key) {
+                        if !tags.contains_key(&key) {
                             tags.add(frame);
                         }
                     }
@@ -112,7 +112,7 @@ pub fn load_id3_from_data(data: &[u8]) -> Result<(ID3Tags, Option<ID3Header>)> {
         let v1_frames = id3v1::parse_id3v1(data)?;
         for frame in v1_frames {
             let key = frame.hash_key();
-            if !tags.frames.contains_key(&key) {
+            if !tags.contains_key(&key) {
                 tags.add(frame);
             }
         }
