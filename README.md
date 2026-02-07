@@ -1,5 +1,11 @@
 # mutagen-rs
 
+---
+# ⚠️ This repository has been moved to be under the AiBrush Organization. Please use the code from here [mutagen-rs](https://github.com/AiBrush/mutagen-rs) ⚠️
+---
+
+
+
 A high-performance audio metadata library written in Rust with Python bindings. Drop-in replacement for Python's [mutagen](https://github.com/quodlibet/mutagen) with **8-45x faster** metadata parsing.
 
 ## Supported Formats
